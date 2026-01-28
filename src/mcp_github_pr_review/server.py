@@ -1449,8 +1449,8 @@ class PRReviewServer:
             return [{"error": error_msg}]
 
     async def run(self) -> None:
-        """Start the MCP server."""
-        print("Running MCP Server...", file=sys.stderr)
+        """Start the MCP server over stdio."""
+        print("Running MCP Server over stdio...", file=sys.stderr)
         # Import stdio here to avoid potential issues with event loop
         from mcp.server.stdio import stdio_server
 
@@ -1474,6 +1474,64 @@ class PRReviewServer:
                     capabilities=capabilities,
                 ),
             )
+
+    async def run_http(self, host: str = "127.0.0.1", port: int = 8000) -> None:
+        """Start the MCP server over HTTP with streaming.
+
+        Uses StreamableHTTPServerTransport with JSON response mode for
+        standard JSON-RPC over HTTP POST. Returns JSON responses for
+        all requests. Compatible with MCP HTTP clients.
+
+        Args:
+            host: Host to bind to (default: 127.0.0.1)
+            port: Port to bind to (default: 8000)
+        """
+        print(f"Running MCP Server over HTTP on {host}:{port}...", file=sys.stderr)
+        import anyio
+        import uvicorn
+        from mcp.server.streamable_http import StreamableHTTPServerTransport
+        from starlette.applications import Starlette
+
+        notif = NotificationOptions(
+            prompts_changed=False,
+            resources_changed=False,
+            tools_changed=False,
+        )
+        init_options = InitializationOptions(
+            server_name="github_pr_review",
+            server_version=__version__,
+            capabilities=self.server.get_capabilities(
+                notif,
+                experimental_capabilities={},
+            ),
+        )
+
+        # Create HTTP streaming transport with JSON responses
+        transport = StreamableHTTPServerTransport(
+            mcp_session_id=None, is_json_response_enabled=True
+        )
+
+        # Connect transport to MCP server
+        async with transport.connect() as (read_stream, write_stream):
+            # Run MCP server in background with the transport streams
+            async def run_server() -> None:
+                await self.server.run(read_stream, write_stream, init_options)
+
+            # Mount transport as ASGI app directly
+            async def mcp_endpoint(scope, receive, send):  # type: ignore[no-untyped-def]
+                await transport.handle_request(scope, receive, send)
+
+            app = Starlette()
+            app.mount("/", mcp_endpoint)
+
+            # Start the HTTP server
+            config = uvicorn.Config(app, host=host, port=port, log_level="info")
+            uvicorn_server = uvicorn.Server(config)
+
+            # Run both server and uvicorn concurrently
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(run_server)
+                tg.start_soon(uvicorn_server.serve)
 
 
 def create_server() -> PRReviewServer:

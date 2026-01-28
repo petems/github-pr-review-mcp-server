@@ -4,6 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > **⚠️ Security Notice**: Please review [SECURITY.md](SECURITY.md) for important security considerations, particularly regarding agentic workflows and the security implications of implementing PR comments automatically.
 
+## 🚨 CRITICAL: NO SSE - HTTP STREAMING ONLY 🚨
+
+**ABSOLUTE RULE: This project uses HTTP STREAMING, NOT SSE (Server-Sent Events).**
+
+### Why No SSE?
+
+**Reference:** [Why MCP deprecated SSE and went with streamable HTTP](https://blog.fka.dev/blog/2025-06-06-why-mcp-deprecated-sse-and-go-with-streamable-http/?ref=blog.globalping.io)
+
+**Key reasons:**
+- SSE is unreliable and problematic in production
+- HTTP streaming with JSON is more robust and widely supported
+- MCP protocol moved away from SSE for good architectural reasons
+- This project follows best practices by using `StreamableHTTPServerTransport` with JSON mode
+
+### Communication Guidelines
+
+- When discussing the HTTP mode, ONLY mention "HTTP streaming" or "StreamableHTTPServerTransport"
+- NEVER mention "SSE", "Server-Sent Events", or "EventSource" as features we use
+- The `Accept: application/json, text/event-stream` header is required by MCP protocol but we use JSON responses only
+- Focus on HTTP POST requests with JSON-RPC and JSON responses
+- This is HTTP streaming with JSON, NOT event streaming
+
 ## Development Commands
 
 This project uses `uv` as the primary package manager for fast, reproducible development:

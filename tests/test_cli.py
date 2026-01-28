@@ -40,6 +40,11 @@ class TestParseArgs:
 
     def test_parse_args_no_arguments(self) -> None:
         args = parse_args([])
+        assert args.mode is None  # No mode selected defaults to stdio
+
+    def test_parse_args_stdio_no_arguments(self) -> None:
+        args = parse_args(["stdio"])
+        assert args.mode == "stdio"
         assert args.env_file is None
         assert args.max_pages is None
         assert args.max_comments is None
@@ -47,28 +52,29 @@ class TestParseArgs:
         assert args.max_retries is None
 
     def test_parse_args_with_env_file(self) -> None:
-        args = parse_args(["--env-file", "/path/to/.env"])
+        args = parse_args(["stdio", "--env-file", "/path/to/.env"])
         assert args.env_file == Path("/path/to/.env")
 
     def test_parse_args_with_max_pages(self) -> None:
-        args = parse_args(["--max-pages", "10"])
+        args = parse_args(["stdio", "--max-pages", "10"])
         assert args.max_pages == 10
 
     def test_parse_args_with_max_comments(self) -> None:
-        args = parse_args(["--max-comments", "500"])
+        args = parse_args(["stdio", "--max-comments", "500"])
         assert args.max_comments == 500
 
     def test_parse_args_with_per_page(self) -> None:
-        args = parse_args(["--per-page", "50"])
+        args = parse_args(["stdio", "--per-page", "50"])
         assert args.per_page == 50
 
     def test_parse_args_with_max_retries(self) -> None:
-        args = parse_args(["--max-retries", "5"])
+        args = parse_args(["stdio", "--max-retries", "5"])
         assert args.max_retries == 5
 
     def test_parse_args_with_all_options(self) -> None:
         args = parse_args(
             [
+                "stdio",
                 "--env-file",
                 ".env.test",
                 "--max-pages",
@@ -87,17 +93,29 @@ class TestParseArgs:
         assert args.per_page == 75
         assert args.max_retries == 3
 
+    def test_parse_args_http_mode(self) -> None:
+        args = parse_args(["http", "--host", "0.0.0.0", "--port", "9000"])  # noqa: S104
+        assert args.mode == "http"
+        assert args.host == "0.0.0.0"  # noqa: S104
+        assert args.port == 9000
+
+    def test_parse_args_http_mode_defaults(self) -> None:
+        args = parse_args(["http"])
+        assert args.mode == "http"
+        assert args.host == "127.0.0.1"
+        assert args.port == 8000
+
     def test_parse_args_invalid_max_pages(self) -> None:
         with pytest.raises(SystemExit):
-            parse_args(["--max-pages", "-1"])
+            parse_args(["stdio", "--max-pages", "-1"])
 
     def test_parse_args_invalid_max_comments(self) -> None:
         with pytest.raises(SystemExit):
-            parse_args(["--max-comments", "0"])
+            parse_args(["stdio", "--max-comments", "0"])
 
     def test_parse_args_invalid_per_page(self) -> None:
         with pytest.raises(SystemExit):
-            parse_args(["--per-page", "abc"])
+            parse_args(["stdio", "--per-page", "abc"])
 
 
 class TestMain:
@@ -128,7 +146,7 @@ class TestMain:
         mock_server = MagicMock()
         mock_server_class.return_value = mock_server
 
-        result = main(["--env-file", "/custom/.env"])
+        result = main(["stdio", "--env-file", "/custom/.env"])
 
         assert result == 0
         mock_load_dotenv.assert_called_once_with(Path("/custom/.env"), override=True)
@@ -169,6 +187,7 @@ class TestMain:
 
         result = main(
             [
+                "stdio",
                 "--max-pages",
                 "15",
                 "--max-comments",
@@ -218,7 +237,7 @@ class TestMain:
 
         mock_asyncio_run.side_effect = _capture_env
 
-        result = main(["--max-pages", "25"])
+        result = main(["stdio", "--max-pages", "25"])
 
         assert result == 0
         mock_asyncio_run.assert_called_once_with(mock_server.run())
@@ -228,6 +247,24 @@ class TestMain:
         }
         assert os.environ.get("PR_FETCH_MAX_PAGES") is None
         assert os.environ.get("HTTP_PER_PAGE") is None
+
+    @patch("mcp_github_pr_review.cli.PRReviewServer")
+    @patch("mcp_github_pr_review.cli.load_dotenv")
+    @patch("mcp_github_pr_review.cli.asyncio.run")
+    def test_main_http_mode(
+        self, mock_asyncio_run: Mock, mock_load_dotenv: Mock, mock_server_class: Mock
+    ) -> None:
+        mock_server = MagicMock()
+        mock_server_class.return_value = mock_server
+
+        result = main(["http", "--host", "0.0.0.0", "--port", "9000"])  # noqa: S104
+
+        assert result == 0
+        mock_load_dotenv.assert_called_once_with(override=False)
+        mock_server_class.assert_called_once()
+        mock_asyncio_run.assert_called_once_with(
+            mock_server.run_http(host="0.0.0.0", port=9000)  # noqa: S104
+        )
 
     @patch("mcp_github_pr_review.cli.PRReviewServer")
     @patch("mcp_github_pr_review.cli.load_dotenv")
