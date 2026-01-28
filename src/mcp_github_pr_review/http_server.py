@@ -1,23 +1,24 @@
-"""FastAPI HTTP server with SSE transport for MCP protocol.
+"""FastAPI HTTP server with MCP Streaming HTTP transport.
 
 This module implements an HTTP server that exposes the MCP GitHub PR Review
-server over Server-Sent Events (SSE). It provides:
-    - REST API endpoints for MCP tools
-    - SSE endpoint for MCP protocol streaming
+server over the MCP Streaming HTTP protocol (spec: 2025-03-26). It provides:
+    - MCP JSON-RPC endpoints (POST/GET/DELETE /mcp)
+    - Session management with automatic cleanup
     - Authentication and rate limiting
     - Health checks and monitoring
+    - Admin API for token management
 
 Architecture:
     - FastAPI for HTTP routing and OpenAPI docs
-    - sse-starlette for SSE streaming
-    - MCP protocol over SSE events
-    - Per-user GitHub token mapping
+    - sse-starlette for SSE streaming (GET /mcp)
+    - MCP protocol over HTTP with JSON-RPC
+    - Per-user GitHub token mapping via sessions
 
 Security:
     - Bearer token authentication (MCP API keys)
     - Per-user rate limiting
     - CORS configuration
-    - Admin API for token management
+    - Session-based authentication after initialize
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -33,11 +33,18 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sse_starlette import EventSourceResponse
 
 from .auth import authenticate_and_rate_limit, verify_admin_token
 from .config import get_settings
+from .mcp_transport import (
+    MCPMessageHandler,
+    MCPSessionStore,
+    create_jsonrpc_error,
+    is_request,
+)
 from .rate_limiter import get_rate_limiter
 from .server import PRReviewServer
 from .token_store import generate_mcp_key, get_token_store
@@ -50,6 +57,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Initialize MCP transport components
+pr_review_server = PRReviewServer()
+mcp_session_store = MCPSessionStore()
+mcp_handler = MCPMessageHandler(pr_review_server)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -57,6 +69,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     Handles server startup and shutdown, including:
     - Starting rate limiter background tasks
+    - Starting session cleanup task
     - Cleanup on shutdown
     """
     logger.info("Starting MCP HTTP server")
@@ -65,10 +78,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     limiter = get_rate_limiter()
     await limiter.start()
 
+    # Start session cleanup task
+    async def cleanup_sessions() -> None:
+        while True:
+            await asyncio.sleep(300)  # Every 5 minutes
+            count = await mcp_session_store.cleanup_expired(max_age_seconds=3600)
+            if count > 0:
+                logger.info(f"Cleaned up {count} expired MCP sessions")
+
+    cleanup_task = asyncio.create_task(cleanup_sessions())
+
     yield
 
     # Cleanup
     logger.info("Shutting down MCP HTTP server")
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
     await limiter.stop()
 
 
@@ -143,7 +171,7 @@ async def root() -> dict[str, Any]:
         "endpoints": {
             "health": "/health",
             "docs": "/docs",
-            "mcp_sse": "/sse",
+            "mcp": "/mcp (POST/GET/DELETE)",
             "admin": "/admin/*",
         },
         "stats": {
@@ -154,118 +182,114 @@ async def root() -> dict[str, Any]:
 
 
 # =====================================================================
-# MCP Tool Endpoints
+# MCP Protocol Endpoints (JSON-RPC over HTTP)
 # =====================================================================
 
 
-class FetchCommentsRequest(BaseModel):
-    """Request model for fetching PR comments."""
-
-    pr_url: str | None = Field(default=None, description="GitHub PR URL")
-    output: str = Field(
-        default="markdown", description="Output format (markdown/json/both)"
-    )
-    per_page: int | None = Field(default=None, ge=1, le=100)
-    max_pages: int | None = Field(default=None, ge=1, le=200)
-    max_comments: int | None = Field(default=None, ge=100, le=100000)
-    max_retries: int | None = Field(default=None, ge=0, le=10)
-    owner: str | None = None
-    repo: str | None = None
-    branch: str | None = None
-    select_strategy: str = "branch"
-
-
-class FetchCommentsResponse(BaseModel):
-    """Response model for fetching PR comments."""
-
-    success: bool
-    data: Any
-    error: str | None = None
-
-
-@app.post("/api/fetch-comments", tags=["mcp"], response_model=FetchCommentsResponse)
-async def fetch_pr_comments(
-    request: FetchCommentsRequest,
+@app.post("/mcp", tags=["mcp"])
+async def mcp_post_endpoint(
+    request: Request,
     auth: tuple[str, str] = Depends(authenticate_and_rate_limit),
-) -> FetchCommentsResponse:
-    """Fetch PR review comments (MCP tool endpoint).
+) -> Any:
+    """Handle client→server JSON-RPC messages.
+
+    Accepts:
+    - Single JSON-RPC request/notification/response
+    - Batch of requests/notifications/responses
+
+    Returns:
+    - 202 Accepted (for notifications/responses only)
+    - JSON response (quick operations)
+    - SSE stream (long operations or server needs to send requests)
 
     Args:
-        request: Request parameters
+        request: FastAPI request
         auth: Authentication tuple (mcp_key, github_token)
 
     Returns:
-        PR comments in requested format
+        JSON response or 202 Accepted
     """
     mcp_key, github_token = auth
 
-    # Create MCP server instance with user's GitHub token
-    # Store original env var and temporarily override
-    original_token = os.environ.get("GITHUB_TOKEN")
+    # Parse session ID from header
+    session_id = request.headers.get("Mcp-Session-Id")
+
+    # Get or create session
+    if session_id:
+        session = await mcp_session_store.get_session(session_id)
+        if not session:
+            return JSONResponse({"error": "Session not found"}, status_code=404)
+        # Update activity
+        await mcp_session_store.update_activity(session_id)
+    else:
+        # No session ID - only valid for initialize
+        session = None
+
+    # Parse JSON-RPC message(s)
     try:
-        os.environ["GITHUB_TOKEN"] = github_token
-
-        server = PRReviewServer()
-
-        # Call the fetch_pr_review_comments method
-        comments = await server.fetch_pr_review_comments(
-            pr_url=request.pr_url,
-            per_page=request.per_page,
-            max_pages=request.max_pages,
-            max_comments=request.max_comments,
-            max_retries=request.max_retries,
-            select_strategy=request.select_strategy,
-            owner=request.owner,
-            repo=request.repo,
-            branch=request.branch,
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse(
+            create_jsonrpc_error(None, -32700, "Parse error"), status_code=400
         )
 
-        # Format response based on output parameter
-        if request.output == "json":
-            return FetchCommentsResponse(success=True, data=comments)
-        elif request.output == "markdown":
-            from .server import generate_markdown
+    messages = body if isinstance(body, list) else [body]
 
-            markdown = generate_markdown(comments)
-            return FetchCommentsResponse(success=True, data=markdown)
-        else:  # both
-            from .server import generate_markdown
+    # Check if all are notifications/responses (no requests)
+    has_requests = any(is_request(msg) for msg in messages)
 
-            markdown = generate_markdown(comments)
-            return FetchCommentsResponse(
-                success=True,
-                data={"json": comments, "markdown": markdown},
-            )
+    if not has_requests:
+        # Process notifications/responses (no response needed)
+        for msg in messages:
+            await mcp_handler.handle_message(session, msg)
+        return Response(status_code=202)
 
-    except Exception as e:
-        logger.exception("Error fetching PR comments")
-        return FetchCommentsResponse(
-            success=False,
-            data=None,
-            error=str(e),
-        )
-    finally:
-        # Restore original token
-        if original_token:
-            os.environ["GITHUB_TOKEN"] = original_token
-        elif "GITHUB_TOKEN" in os.environ:
-            del os.environ["GITHUB_TOKEN"]
+    # Has requests - need to respond
+    # For quick operations: return JSON
+    # For initialize or potential streaming: use SSE
+
+    is_initialize = any(
+        msg.get("method") == "initialize" for msg in messages if is_request(msg)
+    )
+
+    if is_initialize:
+        # Initialize always returns JSON + creates session
+        result = await mcp_handler.handle_message(None, messages[0])
+
+        # Create session
+        new_session = await mcp_session_store.create_session(mcp_key, github_token)
+
+        # Mark session as initialized
+        new_session.initialized = True
+        new_session.client_info = messages[0].get("params", {}).get("clientInfo", {})
+        new_session.capabilities = messages[0].get("params", {}).get("capabilities", {})
+
+        headers = {"Mcp-Session-Id": new_session.session_id}
+        return JSONResponse(result, headers=headers)
+
+    # Non-initialize requests - decide JSON vs SSE
+    # For now, use JSON for all (can add SSE streaming later)
+    responses = []
+    for msg in messages:
+        if is_request(msg):
+            result = await mcp_handler.handle_message(session, msg)
+            responses.append(result)
+
+    # Return single response or batch
+    result_data = responses[0] if len(responses) == 1 else responses
+    return JSONResponse(result_data)
 
 
-# =====================================================================
-# SSE Endpoint for MCP Protocol
-# =====================================================================
-
-
-@app.get("/sse", tags=["mcp"])
-async def mcp_sse_endpoint(
+@app.get("/mcp", tags=["mcp"], response_model=None)
+async def mcp_get_endpoint(
     request: Request,
     auth: tuple[str, str] = Depends(authenticate_and_rate_limit),
-) -> EventSourceResponse:
-    """SSE endpoint for MCP protocol streaming.
+) -> EventSourceResponse | JSONResponse:
+    """Open SSE stream for server→client messages.
 
-    This endpoint provides Server-Sent Events for the MCP protocol,
-    allowing clients to stream MCP messages over HTTP.
+    Used for:
+    - Server-initiated requests/notifications
+    - Resuming broken connections (with Last-Event-ID)
 
     Args:
         request: FastAPI request
@@ -274,42 +298,77 @@ async def mcp_sse_endpoint(
     Returns:
         SSE event stream
     """
+    import time
+
     mcp_key, github_token = auth
 
-    async def event_generator() -> AsyncIterator[dict[str, str]]:
-        """Generate SSE events for MCP protocol."""
-        try:
-            # Send connection established event
-            yield {
-                "event": "connected",
-                "data": json.dumps(
-                    {
-                        "status": "connected",
-                        "mcp_version": "1.0",
-                    }
-                ),
-            }
+    # Get session
+    session_id = request.headers.get("Mcp-Session-Id")
+    if not session_id:
+        return JSONResponse({"error": "Mcp-Session-Id required"}, status_code=400)
 
-            # Keep connection alive with periodic pings
+    session = await mcp_session_store.get_session(session_id)
+    if not session:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+
+    # Check for resumption (for future enhancement)
+    # last_event_id = request.headers.get("Last-Event-ID")
+
+    async def event_generator() -> AsyncIterator[dict[str, str]]:
+        """Generate SSE events for server→client messages."""
+        try:
+            # If resuming, replay messages after last_event_id
+            # (For now, no resumption - future enhancement)
+
+            # Send keepalive pings
             while True:
                 if await request.is_disconnected():
                     break
 
+                # TODO: Send server-initiated requests/notifications
+                # For now, just keepalive
                 yield {
                     "event": "ping",
-                    "data": json.dumps({"timestamp": asyncio.get_event_loop().time()}),
+                    "data": json.dumps({"timestamp": time.time()}),
                 }
 
-                await asyncio.sleep(30)  # Ping every 30 seconds
+                await asyncio.sleep(30)
 
         except asyncio.CancelledError:
-            logger.info(
-                "SSE connection cancelled", extra={"key_prefix": mcp_key[:8] + "..."}
-            )
+            logger.info("SSE connection cancelled")
         except Exception:
-            logger.exception("Error in SSE event generator")
+            logger.exception("Error in SSE stream")
 
     return EventSourceResponse(event_generator())
+
+
+@app.delete("/mcp", tags=["mcp"])
+async def mcp_delete_endpoint(
+    request: Request,
+    auth: tuple[str, str] = Depends(authenticate_and_rate_limit),
+) -> Any:
+    """Terminate MCP session.
+
+    Client calls this when leaving the application.
+
+    Args:
+        request: FastAPI request
+        auth: Authentication tuple (mcp_key, github_token)
+
+    Returns:
+        204 No Content or error response
+    """
+    # Get session ID
+    session_id = request.headers.get("Mcp-Session-Id")
+    if not session_id:
+        return JSONResponse({"error": "Mcp-Session-Id required"}, status_code=400)
+
+    # Delete session
+    deleted = await mcp_session_store.delete_session(session_id)
+    if not deleted:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+
+    return Response(status_code=204)
 
 
 # =====================================================================
