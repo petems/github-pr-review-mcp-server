@@ -1487,10 +1487,18 @@ class PRReviewServer:
             port: Port to bind to (default: 8000)
         """
         print(f"Running MCP Server over HTTP on {host}:{port}...", file=sys.stderr)
-        import anyio
-        import uvicorn
-        from mcp.server.streamable_http import StreamableHTTPServerTransport
-        from starlette.applications import Starlette
+        try:
+            import anyio
+            import uvicorn
+            from mcp.server.streamable_http import StreamableHTTPServerTransport
+            from starlette.applications import Starlette
+        except ImportError as exc:
+            print(
+                "HTTP dependencies are not installed. "
+                "Install with 'pip install mcp-github-pr-review[http]'.",
+                file=sys.stderr,
+            )
+            raise RuntimeError("Missing HTTP dependencies") from exc
 
         notif = NotificationOptions(
             prompts_changed=False,
