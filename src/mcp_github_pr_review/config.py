@@ -81,7 +81,7 @@ class ServerSettings(BaseSettings):
     to preserve backward compatibility with the previous implementation.
 
     Environment Variables:
-        GITHUB_TOKEN: GitHub Personal Access Token (required)
+        GITHUB_TOKEN: GitHub Personal Access Token (required for stdio mode, optional for http)
         GH_HOST: GitHub hostname (default: "github.com")
         GITHUB_API_URL: REST API base URL override (optional)
         GITHUB_GRAPHQL_URL: GraphQL API URL override (optional)
@@ -94,6 +94,26 @@ class ServerSettings(BaseSettings):
             (default: 30.0, range: 1.0-300.0)
         HTTP_CONNECT_TIMEOUT: HTTP connection timeout in seconds
             (default: 10.0, range: 1.0-60.0)
+
+        MCP Server Mode (HTTP/SSE):
+        MCP_MODE: Server mode - "stdio" or "http" (default: "stdio")
+        MCP_HOST: HTTP server bind address (default: "0.0.0.0")
+        MCP_PORT: HTTP server port (default: 8080)
+        MCP_BASE_PATH: Base path for API endpoints (default: "")
+
+        Authentication (HTTP mode):
+        MCP_SECRET_KEY: Secret key for JWT/admin operations (required in http mode)
+        MCP_ADMIN_TOKEN: Admin API key for token management (optional)
+
+        Rate Limiting (HTTP mode):
+        RATE_LIMIT_ENABLED: Enable rate limiting (default: true)
+        RATE_LIMIT_REQUESTS_PER_MINUTE: Max requests per minute per user (default: 60)
+        RATE_LIMIT_BURST: Burst allowance above the per-minute limit (default: 10)
+
+        CORS Configuration (HTTP mode):
+        CORS_ENABLED: Enable CORS (default: true)
+        CORS_ALLOW_ORIGINS: Comma-separated allowed origins (default: "*")
+        CORS_ALLOW_CREDENTIALS: Allow credentials (default: true)
     """
 
     model_config = SettingsConfigDict(
@@ -104,10 +124,30 @@ class ServerSettings(BaseSettings):
         frozen=True,
     )
 
+    # Server Mode Configuration
+    mcp_mode: str = Field(
+        default="stdio",
+        description="Server mode: 'stdio' for local MCP or 'http' for remote SSE",
+    )
+    mcp_host: str = Field(
+        default="0.0.0.0",
+        description="HTTP server bind address (http mode only)",
+    )
+    mcp_port: int = Field(
+        default=8080,
+        ge=1,
+        le=65535,
+        description="HTTP server port (http mode only)",
+    )
+    mcp_base_path: str = Field(
+        default="",
+        description="Base path for API endpoints (http mode only)",
+    )
+
     # GitHub Configuration
-    github_token: SecretStr = Field(
-        ...,
-        description="GitHub Personal Access Token for API authentication (required)",
+    github_token: SecretStr | None = Field(
+        default=None,
+        description="GitHub Personal Access Token (required for stdio, optional for http)",
     )
     gh_host: str = Field(
         default="github.com",
@@ -120,6 +160,48 @@ class ServerSettings(BaseSettings):
     github_graphql_url: str | None = Field(
         default=None,
         description="Override for GitHub GraphQL API URL (for enterprise instances)",
+    )
+
+    # Authentication Configuration (HTTP mode)
+    mcp_secret_key: SecretStr | None = Field(
+        default=None,
+        description="Secret key for JWT/admin operations (required in http mode)",
+    )
+    mcp_admin_token: SecretStr | None = Field(
+        default=None,
+        description="Admin API key for token management (optional)",
+    )
+
+    # Rate Limiting Configuration (HTTP mode)
+    rate_limit_enabled: bool = Field(
+        default=True,
+        description="Enable per-user rate limiting (http mode only)",
+    )
+    rate_limit_requests_per_minute: int = Field(
+        default=60,
+        ge=1,
+        le=10000,
+        description="Maximum requests per minute per user",
+    )
+    rate_limit_burst: int = Field(
+        default=10,
+        ge=0,
+        le=1000,
+        description="Burst allowance above the per-minute limit",
+    )
+
+    # CORS Configuration (HTTP mode)
+    cors_enabled: bool = Field(
+        default=True,
+        description="Enable CORS headers (http mode only)",
+    )
+    cors_allow_origins: str = Field(
+        default="*",
+        description="Comma-separated list of allowed origins (* for all)",
+    )
+    cors_allow_credentials: bool = Field(
+        default=True,
+        description="Allow credentials in CORS requests",
     )
 
     # Pagination Configuration
@@ -162,26 +244,47 @@ class ServerSettings(BaseSettings):
         description="HTTP connection timeout in seconds",
     )
 
+    @field_validator("mcp_mode", mode="before")
+    @classmethod
+    def validate_mcp_mode(cls, v: Any) -> str:
+        """Validate MCP server mode.
+
+        Args:
+            v: The mode value
+
+        Returns:
+            Validated mode ("stdio" or "http")
+
+        Raises:
+            ValueError: If mode is invalid
+        """
+        if v is None:
+            return "stdio"
+
+        mode = str(v).strip().lower()
+        if mode not in ("stdio", "http"):
+            msg = f"Invalid MCP_MODE: {mode!r}. Must be 'stdio' or 'http'."
+            raise ValueError(msg)
+
+        return mode
+
     @field_validator("github_token", mode="before")
     @classmethod
-    def validate_github_token(cls, v: Any) -> str:
+    def validate_github_token(cls, v: Any) -> str | None:
         """Validate and sanitize GitHub token.
 
         Args:
             v: The GitHub token value
 
         Returns:
-            The validated token (stripped of whitespace)
+            The validated token (stripped of whitespace) or None if not provided
 
         Raises:
             ValueError: If token is whitespace-only
         """
-        if v is None:
-            msg = (
-                "GITHUB_TOKEN is required. "
-                "Please provide a valid GitHub Personal Access Token."
-            )
-            raise ValueError(msg)
+        # Allow None for http mode (token comes from user mappings)
+        if v is None or v == "":
+            return None
 
         raw_value: str
         if isinstance(v, SecretStr):
@@ -198,13 +301,9 @@ class ServerSettings(BaseSettings):
         # Strip whitespace
         token = raw_value.strip()
 
-        # Reject whitespace-only tokens (empty is caught by required field)
+        # Reject whitespace-only tokens
         if not token:
-            msg = (
-                "GITHUB_TOKEN cannot be whitespace-only. "
-                "Please provide a valid GitHub Personal Access Token."
-            )
-            raise ValueError(msg)
+            return None
 
         return token
 
@@ -373,6 +472,40 @@ class ServerSettings(BaseSettings):
         return _clamp_numeric_value(v, field_info, float, math.isfinite)
 
     @model_validator(mode="after")
+    def validate_mode_requirements(self) -> "ServerSettings":
+        """Validate mode-specific required fields.
+
+        Ensures that:
+        - stdio mode: github_token is required
+        - http mode: mcp_secret_key is required
+
+        Returns:
+            Self after validation
+
+        Raises:
+            ValueError: If required fields are missing for the selected mode
+        """
+        # Check stdio mode requirements
+        if self.mcp_mode == "stdio":
+            if self.github_token is None:
+                msg = (
+                    "GITHUB_TOKEN is required in stdio mode. "
+                    "Please provide a valid GitHub Personal Access Token."
+                )
+                raise ValueError(msg)
+
+        # Check http mode requirements
+        if self.mcp_mode == "http":
+            if self.mcp_secret_key is None:
+                msg = (
+                    "MCP_SECRET_KEY is required in http mode. "
+                    "Please provide a secret key for authentication."
+                )
+                raise ValueError(msg)
+
+        return self
+
+    @model_validator(mode="after")
     def validate_timeout_consistency(self) -> "ServerSettings":
         """Ensure connect timeout does not exceed total timeout.
 
@@ -436,6 +569,16 @@ class ServerSettings(BaseSettings):
         data = self.model_dump()
         data.update(overrides)
         return self.__class__.model_validate(data)
+
+    def get_cors_origins(self) -> list[str]:
+        """Parse CORS allowed origins from comma-separated string.
+
+        Returns:
+            List of allowed origin strings, with whitespace stripped
+        """
+        if self.cors_allow_origins == "*":
+            return ["*"]
+        return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
 
 
 @lru_cache
