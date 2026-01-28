@@ -341,7 +341,7 @@ class TestMain:
 
         assert result == 1
         captured = capsys.readouterr()
-        assert "Invalid port" in captured.err
+        assert "Invalid --http value" in captured.err
 
     @patch("mcp_github_pr_review.cli.PRReviewServer")
     @patch("mcp_github_pr_review.cli.load_dotenv")
@@ -358,4 +358,4 @@ class TestMain:
 
         assert result == 1
         captured = capsys.readouterr()
-        assert "requires HOST:PORT format" in captured.err
+        assert "Invalid --http value" in captured.err

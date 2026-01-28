@@ -105,15 +105,23 @@ def main(argv: list[str] | None = None) -> int:
         with _temporary_env_overrides(env_overrides):
             if args.http:
                 # Parse host:port
-                if ":" in args.http:
-                    host, port_str = args.http.rsplit(":", 1)
-                    try:
-                        port = int(port_str)
-                    except ValueError:
-                        print(f"Error: Invalid port '{port_str}'", file=sys.stderr)
-                        return 1
-                else:
-                    print("Error: --http requires HOST:PORT format", file=sys.stderr)
+                try:
+                    raw_http = args.http.strip()
+                    host, port_str = raw_http.rsplit(":", 1)
+                    host = host.strip()
+                    port_str = port_str.strip()
+                    if not host:
+                        raise ValueError("Host cannot be empty.")
+                    port = int(port_str)
+                    if not (1 <= port <= 65535):
+                        raise ValueError("Port out of range.")
+                except ValueError:
+                    print(
+                        f"Error: Invalid --http value '{args.http}'. "
+                        "Expected HOST:PORT format with a non-empty host and "
+                        "port between 1 and 65535.",
+                        file=sys.stderr,
+                    )
                     return 1
                 asyncio.run(server.run_http(host=host, port=port))
             else:
