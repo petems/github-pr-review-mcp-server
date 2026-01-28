@@ -17,7 +17,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from fastapi import Header, HTTPException, Request, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import HTTPBearer
 
 from .config import get_settings
 from .rate_limiter import get_rate_limiter
@@ -41,7 +41,7 @@ class AuthenticationError(Exception):
         super().__init__(message)
 
 
-class RateLimitExceeded(Exception):
+class RateLimitExceededError(Exception):
     """Raised when rate limit is exceeded."""
 
     def __init__(self, limit_info: RateLimitInfo):
@@ -228,9 +228,10 @@ async def check_rate_limit(mcp_key: str) -> None:
                 "retry_after": limit_info.retry_after,
             },
         )
+        retry_seconds = limit_info.retry_after
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded. Try again in {limit_info.retry_after:.1f} seconds.",
+            detail=f"Rate limit exceeded. Try again in {retry_seconds:.1f} seconds.",
             headers={
                 "Retry-After": str(int(limit_info.retry_after)),
                 "X-RateLimit-Limit": str(limit_info.limit),
@@ -257,10 +258,11 @@ async def authenticate_and_rate_limit(request: Request) -> tuple[str, str]:
 
     Example:
         >>> @app.get("/api/endpoint")
-        >>> async def endpoint(auth: tuple[str, str] = Depends(authenticate_and_rate_limit)):
-        >>>     mcp_key, github_token = auth
-        >>>     # Use github_token for GitHub API calls
-        >>>     pass
+        >>> async def endpoint(
+        ...     auth: tuple[str, str] = Depends(authenticate_and_rate_limit)
+        ... ):
+        ...     mcp_key, github_token = auth
+        ...     # Use github_token for GitHub API calls
     """
     # Extract Authorization header
     auth_header = request.headers.get("authorization")

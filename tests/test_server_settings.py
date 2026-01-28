@@ -65,9 +65,10 @@ class TestGithubToken:
     def test_missing_token_raises_validation_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Ensure no token in environment
+        # Ensure no token in environment and we're in stdio mode (default)
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-        with pytest.raises(ValidationError, match="Field required"):
+        monkeypatch.setenv("MCP_MODE", "stdio")
+        with pytest.raises(ValidationError, match="GITHUB_TOKEN is required"):
             ServerSettings(_env_file=None)
 
     def test_none_token_raises_validation_error(self) -> None:
@@ -78,9 +79,13 @@ class TestGithubToken:
         with pytest.raises(ValidationError, match="GITHUB_TOKEN must be a string"):
             ServerSettings(github_token=12345)  # type: ignore[arg-type]
 
-    def test_whitespace_only_token_raises_validation_error(self) -> None:
-        with pytest.raises(ValidationError, match="cannot be whitespace-only"):
-            ServerSettings(github_token="   ")  # noqa: S106
+    def test_whitespace_only_token_raises_validation_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Ensure we're in stdio mode where token is required
+        monkeypatch.setenv("MCP_MODE", "stdio")
+        with pytest.raises(ValidationError, match="GITHUB_TOKEN is required"):
+            ServerSettings(github_token="   ", _env_file=None)  # noqa: S106
 
 
 class TestUrlValidation:

@@ -27,12 +27,12 @@ import json
 import logging
 import os
 import sys
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette import EventSourceResponse
 
@@ -40,13 +40,19 @@ from .auth import authenticate_and_rate_limit, verify_admin_token
 from .config import get_settings
 from .rate_limiter import get_rate_limiter
 from .server import PRReviewServer
-from .token_store import TokenMapping, generate_mcp_key, get_token_store
+from .token_store import generate_mcp_key, get_token_store
+
+# OAuth routes (conditionally included if enabled)
+try:
+    from . import oauth_routes
+except ImportError:
+    oauth_routes = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """FastAPI lifespan context manager.
 
     Handles server startup and shutdown, including:
@@ -91,6 +97,14 @@ if settings.cors_enabled:
             "Retry-After",
         ],
     )
+
+
+# Configure OAuth routes (if enabled)
+if settings.github_oauth_enabled and oauth_routes:
+    logger.info("OAuth is enabled - including OAuth authentication routes")
+    app.include_router(oauth_routes.router)
+else:
+    logger.info("OAuth is disabled - OAuth routes not included")
 
 
 # =====================================================================
@@ -148,7 +162,9 @@ class FetchCommentsRequest(BaseModel):
     """Request model for fetching PR comments."""
 
     pr_url: str | None = Field(default=None, description="GitHub PR URL")
-    output: str = Field(default="markdown", description="Output format (markdown/json/both)")
+    output: str = Field(
+        default="markdown", description="Output format (markdown/json/both)"
+    )
     per_page: int | None = Field(default=None, ge=1, le=100)
     max_pages: int | None = Field(default=None, ge=1, le=200)
     max_comments: int | None = Field(default=None, ge=100, le=100000)
@@ -260,16 +276,18 @@ async def mcp_sse_endpoint(
     """
     mcp_key, github_token = auth
 
-    async def event_generator():
+    async def event_generator() -> AsyncIterator[dict[str, str]]:
         """Generate SSE events for MCP protocol."""
         try:
             # Send connection established event
             yield {
                 "event": "connected",
-                "data": json.dumps({
-                    "status": "connected",
-                    "mcp_version": "1.0",
-                }),
+                "data": json.dumps(
+                    {
+                        "status": "connected",
+                        "mcp_version": "1.0",
+                    }
+                ),
             }
 
             # Keep connection alive with periodic pings
@@ -285,7 +303,9 @@ async def mcp_sse_endpoint(
                 await asyncio.sleep(30)  # Ping every 30 seconds
 
         except asyncio.CancelledError:
-            logger.info("SSE connection cancelled", extra={"key_prefix": mcp_key[:8] + "..."})
+            logger.info(
+                "SSE connection cancelled", extra={"key_prefix": mcp_key[:8] + "..."}
+            )
         except Exception:
             logger.exception("Error in SSE event generator")
 
