@@ -1,5 +1,6 @@
 import asyncio
 import html
+import ipaddress
 import json
 import logging
 import os
@@ -66,6 +67,16 @@ def escape_html_safe(text: Any) -> str:
     if text is None:
         return "N/A"
     return html.escape(str(text), quote=True)
+
+
+def _is_loopback_host(host: str) -> bool:
+    host_value = host.strip().lower()
+    if host_value == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host_value).is_loopback
+    except ValueError:
+        return False
 
 
 # Parameter ranges (keep in sync with env clamping)
@@ -1486,7 +1497,6 @@ class PRReviewServer:
             host: Host to bind to (default: 127.0.0.1)
             port: Port to bind to (default: 8000)
         """
-        print(f"Running MCP Server over HTTP on {host}:{port}...", file=sys.stderr)
         try:
             import anyio
             import uvicorn
@@ -1499,6 +1509,22 @@ class PRReviewServer:
                 file=sys.stderr,
             )
             raise RuntimeError("Missing HTTP dependencies") from exc
+
+        auth_token = os.getenv("MCP_HTTP_AUTH_TOKEN", "").strip() or None
+        allow_public = os.getenv("MCP_HTTP_ALLOW_PUBLIC", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if not _is_loopback_host(host) and not auth_token and not allow_public:
+            print(
+                "Refusing to bind to a non-loopback host without HTTP auth. "
+                "Set MCP_HTTP_AUTH_TOKEN or MCP_HTTP_ALLOW_PUBLIC=1 to proceed.",
+                file=sys.stderr,
+            )
+            raise RuntimeError("HTTP auth required for non-loopback host")
+
+        print(f"Running MCP Server over HTTP on {host}:{port}...", file=sys.stderr)
 
         notif = NotificationOptions(
             prompts_changed=False,
@@ -1527,6 +1553,23 @@ class PRReviewServer:
 
             # Mount transport as ASGI app directly
             async def mcp_endpoint(scope, receive, send):  # type: ignore[no-untyped-def]
+                if auth_token:
+                    headers = dict(scope.get("headers") or [])
+                    provided = headers.get(b"authorization", b"")
+                    if isinstance(provided, bytes | bytearray):
+                        provided = provided.decode("utf-8", "ignore")
+                    if provided != f"Bearer {auth_token}":
+                        await send(
+                            {
+                                "type": "http.response.start",
+                                "status": 401,
+                                "headers": [(b"content-type", b"text/plain")],
+                            }
+                        )
+                        await send(
+                            {"type": "http.response.body", "body": b"Unauthorized"}
+                        )
+                        return
                 await transport.handle_request(scope, receive, send)
 
             app = Starlette()
