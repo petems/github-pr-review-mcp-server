@@ -81,7 +81,8 @@ class ServerSettings(BaseSettings):
     to preserve backward compatibility with the previous implementation.
 
     Environment Variables:
-        GITHUB_TOKEN: GitHub Personal Access Token (required for stdio mode, optional for http)
+        GITHUB_TOKEN: GitHub Personal Access Token
+            (required for stdio mode, optional for http)
         GH_HOST: GitHub hostname (default: "github.com")
         GITHUB_API_URL: REST API base URL override (optional)
         GITHUB_GRAPHQL_URL: GraphQL API URL override (optional)
@@ -130,7 +131,7 @@ class ServerSettings(BaseSettings):
         description="Server mode: 'stdio' for local MCP or 'http' for remote SSE",
     )
     mcp_host: str = Field(
-        default="0.0.0.0",
+        default="0.0.0.0",  # noqa: S104
         description="HTTP server bind address (http mode only)",
     )
     mcp_port: int = Field(
@@ -147,7 +148,9 @@ class ServerSettings(BaseSettings):
     # GitHub Configuration
     github_token: SecretStr | None = Field(
         default=None,
-        description="GitHub Personal Access Token (required for stdio, optional for http)",
+        description=(
+            "GitHub Personal Access Token (required for stdio, optional for http)"
+        ),
     )
     gh_host: str = Field(
         default="github.com",
@@ -202,6 +205,28 @@ class ServerSettings(BaseSettings):
     cors_allow_credentials: bool = Field(
         default=True,
         description="Allow credentials in CORS requests",
+    )
+
+    # OAuth Configuration (HTTP mode)
+    github_oauth_enabled: bool = Field(
+        default=False,
+        description="Enable GitHub OAuth self-service authentication",
+    )
+    github_oauth_client_id: str | None = Field(
+        default=None,
+        description="GitHub OAuth App Client ID",
+    )
+    github_oauth_client_secret: SecretStr | None = Field(
+        default=None,
+        description="GitHub OAuth App Client Secret",
+    )
+    github_oauth_callback_url: str | None = Field(
+        default=None,
+        description="OAuth callback URL (e.g., https://your-server.com/auth/callback)",
+    )
+    github_oauth_scopes: str = Field(
+        default="repo,read:user",
+        description="Comma-separated OAuth scopes to request",
     )
 
     # Pagination Configuration
@@ -578,7 +603,11 @@ class ServerSettings(BaseSettings):
         """
         if self.cors_allow_origins == "*":
             return ["*"]
-        return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
+        return [
+            origin.strip()
+            for origin in self.cors_allow_origins.split(",")
+            if origin.strip()
+        ]
 
 
 @lru_cache

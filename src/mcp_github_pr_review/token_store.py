@@ -17,7 +17,7 @@ import asyncio
 import logging
 import secrets
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Protocol
 
 logger = logging.getLogger(__name__)
@@ -38,14 +38,14 @@ class TokenMapping:
 
     mcp_key: str
     github_token: str
-    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    last_used_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_used_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     user_id: str | None = None
     description: str | None = None
 
     def touch(self) -> None:
         """Update the last_used_at timestamp."""
-        self.last_used_at = datetime.now(UTC)
+        self.last_used_at = datetime.now(timezone.utc)
 
 
 class TokenStore(Protocol):
