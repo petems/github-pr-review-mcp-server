@@ -96,7 +96,7 @@ class ServerSettings(BaseSettings):
         HTTP_CONNECT_TIMEOUT: HTTP connection timeout in seconds
             (default: 10.0, range: 1.0-60.0)
 
-        MCP Server Mode (HTTP/SSE):
+        MCP Server Mode (HTTP):
         MCP_MODE: Server mode - "stdio" or "http" (default: "stdio")
         MCP_HOST: HTTP server bind address (default: "0.0.0.0")
         MCP_PORT: HTTP server port (default: 8080)
@@ -128,7 +128,7 @@ class ServerSettings(BaseSettings):
     # Server Mode Configuration
     mcp_mode: str = Field(
         default="stdio",
-        description="Server mode: 'stdio' for local MCP or 'http' for remote SSE",
+        description="Server mode: 'stdio' for local MCP or 'http' for remote HTTP",
     )
     mcp_host: str = Field(
         default="0.0.0.0",  # noqa: S104

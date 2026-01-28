@@ -1,8 +1,10 @@
 """OAuth authentication routes for FastAPI server.
 
 This module provides HTTP endpoints for the GitHub OAuth flow:
+- /.well-known/oauth-authorization-server: OAuth discovery metadata
 - /auth/login: Initiates OAuth flow
-- /auth/callback: Handles OAuth callback
+- /auth/callback: Handles OAuth callback (HTML response)
+- /auth/token: Token endpoint for programmatic OAuth
 - /auth/status: Check authentication status
 """
 
@@ -13,7 +15,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from pydantic import BaseModel
 
 from .config import get_settings
 from .oauth import (
@@ -28,6 +31,26 @@ logger = logging.getLogger(__name__)
 
 # Create router for OAuth endpoints
 router = APIRouter(prefix="/auth", tags=["authentication"])
+
+
+# Pydantic models for token endpoint
+class TokenRequest(BaseModel):
+    """OAuth token request."""
+
+    grant_type: str
+    code: str | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
+    redirect_uri: str | None = None
+
+
+class TokenResponse(BaseModel):
+    """OAuth token response."""
+
+    access_token: str
+    token_type: str
+    expires_in: int | None = None
+    scope: str | None = None
 
 
 @router.get("/login")
@@ -188,6 +211,97 @@ async def oauth_callback(
             ERROR_PAGE_TEMPLATE.format(error_message=error_msg),
             status_code=500,
         )
+
+
+@router.post("/token")
+async def token_endpoint(
+    request: Request,
+    token_request: TokenRequest,
+) -> JSONResponse:
+    """OAuth 2.0 token endpoint for programmatic access.
+
+    This endpoint exchanges an authorization code for an access token (MCP API key).
+    Used by MCP clients for automated OAuth flows.
+
+    Args:
+        request: FastAPI request
+        token_request: Token request parameters
+
+    Returns:
+        JSONResponse with access token
+    """
+    settings = get_settings()
+
+    if not settings.github_oauth_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OAuth authentication is not enabled",
+        )
+
+    # Only support authorization_code grant type
+    if token_request.grant_type != "authorization_code":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported grant_type. Only 'authorization_code' is supported.",
+        )
+
+    if not token_request.code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing 'code' parameter",
+        )
+
+    try:
+        # Exchange code for GitHub token
+        oauth_client = GitHubOAuthClient(settings)
+        github_token, user_info = await oauth_client.exchange_code(token_request.code)
+
+        # Extract user information
+        username = user_info.get("login", "unknown")
+        user_id = str(user_info.get("id", username))
+
+        # Generate MCP API key
+        mcp_key = generate_mcp_key()
+
+        # Store token mapping
+        token_store = get_token_store()
+        await token_store.store_token(
+            mcp_key=mcp_key,
+            github_token=github_token,
+            user_id=user_id,
+            description=f"OAuth token for {username}",
+        )
+
+        logger.info(
+            "Token endpoint: issued access token",
+            extra={
+                "username": username,
+                "user_id": user_id,
+                "mcp_key_prefix": mcp_key[:8] + "...",
+            },
+        )
+
+        # Return OAuth token response
+        response_data = TokenResponse(
+            access_token=mcp_key,
+            token_type="bearer",  # noqa: S106
+            expires_in=None,  # No expiration (or set a TTL)
+            scope="repo read:user",
+        )
+
+        return JSONResponse(
+            content=response_data.model_dump(),
+            status_code=200,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error in token endpoint")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to issue access token",
+        ) from e
 
 
 @router.get("/status")

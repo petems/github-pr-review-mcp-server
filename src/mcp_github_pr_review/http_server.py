@@ -2,7 +2,7 @@
 
 This module implements an HTTP server that exposes the MCP GitHub PR Review
 server over the MCP Streaming HTTP protocol (spec: 2025-03-26). It provides:
-    - MCP JSON-RPC endpoints (POST/GET/DELETE /mcp)
+    - MCP JSON-RPC endpoints (POST/DELETE /mcp)
     - Session management with automatic cleanup
     - Authentication and rate limiting
     - Health checks and monitoring
@@ -10,8 +10,8 @@ server over the MCP Streaming HTTP protocol (spec: 2025-03-26). It provides:
 
 Architecture:
     - FastAPI for HTTP routing and OpenAPI docs
-    - sse-starlette for SSE streaming (GET /mcp)
-    - MCP protocol over HTTP with JSON-RPC
+    - Pure HTTP streaming with JSON-RPC
+    - MCP protocol over HTTP
     - Per-user GitHub token mapping via sessions
 
 Security:
@@ -35,7 +35,6 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
-from sse_starlette import EventSourceResponse
 
 from .auth import authenticate_and_rate_limit, verify_admin_token
 from .config import get_settings
@@ -136,6 +135,35 @@ else:
 
 
 # =====================================================================
+# OAuth Discovery Endpoint
+# =====================================================================
+
+
+@app.get("/.well-known/oauth-authorization-server", tags=["authentication"])
+async def oauth_discovery_metadata(request: Request) -> dict[str, Any]:
+    """OAuth 2.0 authorization server metadata endpoint.
+
+    Required for MCP clients to automatically discover authentication endpoints.
+    See: RFC 8414 (OAuth 2.0 Authorization Server Metadata)
+
+    Returns:
+        OAuth server metadata including endpoints and supported features
+    """
+    # Build base URL from request
+    base_url = str(request.base_url).rstrip("/")
+
+    return {
+        "issuer": base_url,
+        "authorization_endpoint": f"{base_url}/auth/login",
+        "token_endpoint": f"{base_url}/auth/token",
+        "scopes_supported": ["repo", "read:user"],
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "token_endpoint_auth_methods_supported": ["none"],
+    }
+
+
+# =====================================================================
 # Health and Status Endpoints
 # =====================================================================
 
@@ -171,7 +199,7 @@ async def root() -> dict[str, Any]:
         "endpoints": {
             "health": "/health",
             "docs": "/docs",
-            "mcp": "/mcp (POST/GET/DELETE)",
+            "mcp": "/mcp (POST/DELETE)",
             "admin": "/admin/*",
         },
         "stats": {
@@ -199,8 +227,8 @@ async def mcp_post_endpoint(
 
     Returns:
     - 202 Accepted (for notifications/responses only)
-    - JSON response (quick operations)
-    - SSE stream (long operations or server needs to send requests)
+    - JSON response (for requests)
+    - Streaming response (for long-running operations if needed)
 
     Args:
         request: FastAPI request
@@ -267,8 +295,7 @@ async def mcp_post_endpoint(
         headers = {"Mcp-Session-Id": new_session.session_id}
         return JSONResponse(result, headers=headers)
 
-    # Non-initialize requests - decide JSON vs SSE
-    # For now, use JSON for all (can add SSE streaming later)
+    # Non-initialize requests - use standard JSON responses
     responses = []
     for msg in messages:
         if is_request(msg):
@@ -278,68 +305,6 @@ async def mcp_post_endpoint(
     # Return single response or batch
     result_data = responses[0] if len(responses) == 1 else responses
     return JSONResponse(result_data)
-
-
-@app.get("/mcp", tags=["mcp"], response_model=None)
-async def mcp_get_endpoint(
-    request: Request,
-    auth: tuple[str, str] = Depends(authenticate_and_rate_limit),
-) -> EventSourceResponse | JSONResponse:
-    """Open SSE stream for server→client messages.
-
-    Used for:
-    - Server-initiated requests/notifications
-    - Resuming broken connections (with Last-Event-ID)
-
-    Args:
-        request: FastAPI request
-        auth: Authentication tuple (mcp_key, github_token)
-
-    Returns:
-        SSE event stream
-    """
-    import time
-
-    mcp_key, github_token = auth
-
-    # Get session
-    session_id = request.headers.get("Mcp-Session-Id")
-    if not session_id:
-        return JSONResponse({"error": "Mcp-Session-Id required"}, status_code=400)
-
-    session = await mcp_session_store.get_session(session_id)
-    if not session:
-        return JSONResponse({"error": "Session not found"}, status_code=404)
-
-    # Check for resumption (for future enhancement)
-    # last_event_id = request.headers.get("Last-Event-ID")
-
-    async def event_generator() -> AsyncIterator[dict[str, str]]:
-        """Generate SSE events for server→client messages."""
-        try:
-            # If resuming, replay messages after last_event_id
-            # (For now, no resumption - future enhancement)
-
-            # Send keepalive pings
-            while True:
-                if await request.is_disconnected():
-                    break
-
-                # TODO: Send server-initiated requests/notifications
-                # For now, just keepalive
-                yield {
-                    "event": "ping",
-                    "data": json.dumps({"timestamp": time.time()}),
-                }
-
-                await asyncio.sleep(30)
-
-        except asyncio.CancelledError:
-            logger.info("SSE connection cancelled")
-        except Exception:
-            logger.exception("Error in SSE stream")
-
-    return EventSourceResponse(event_generator())
 
 
 @app.delete("/mcp", tags=["mcp"])
