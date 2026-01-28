@@ -71,9 +71,13 @@ class TestGithubToken:
         with pytest.raises(ValidationError, match="GITHUB_TOKEN is required"):
             ServerSettings(_env_file=None)
 
-    def test_none_token_raises_validation_error(self) -> None:
+    def test_none_token_raises_validation_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Ensure we're in stdio mode where token is required
+        monkeypatch.setenv("MCP_MODE", "stdio")
         with pytest.raises(ValidationError, match="GITHUB_TOKEN is required"):
-            ServerSettings(github_token=None)  # type: ignore[arg-type]
+            ServerSettings(github_token=None, _env_file=None)  # type: ignore[arg-type]
 
     def test_non_string_token_raises_validation_error(self) -> None:
         with pytest.raises(ValidationError, match="GITHUB_TOKEN must be a string"):
