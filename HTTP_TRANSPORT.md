@@ -6,6 +6,9 @@ The MCP server supports HTTP transport for remote access, in addition to the def
 
 **Start HTTP server:**
 ```bash
+# Install HTTP dependencies
+uv sync --extra http
+
 # Default (127.0.0.1:8000)
 uv run mcp-github-pr-review --http
 
@@ -37,6 +40,7 @@ Add to `~/.codex/config.toml`:
 ```toml
 [mcp_servers.github-pr-review]
 url = "http://127.0.0.1:8000"
+transport = "http"
 ```
 
 ## Authentication
@@ -49,6 +53,15 @@ Set the token before starting the server:
 export GITHUB_TOKEN="your_github_token_here"
 uv run mcp-github-pr-review --http
 ```
+
+### HTTP Access Control
+
+To require client authentication, set `MCP_HTTP_AUTH_TOKEN` on the server and send an `Authorization: Bearer <token>` header with requests.
+
+When binding to a non-loopback host (anything other than `localhost`, `127.0.0.1`, or `::1`), the server requires either:
+
+- `MCP_HTTP_AUTH_TOKEN` (recommended), or
+- `MCP_HTTP_ALLOW_PUBLIC=1` to explicitly opt into unauthenticated public access.
 
 ## Technical Details
 
