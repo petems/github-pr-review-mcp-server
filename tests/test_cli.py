@@ -40,6 +40,7 @@ class TestParseArgs:
 
     def test_parse_args_no_arguments(self) -> None:
         args = parse_args([])
+        assert args.http is None
         assert args.env_file is None
         assert args.max_pages is None
         assert args.max_comments is None
@@ -98,6 +99,14 @@ class TestParseArgs:
     def test_parse_args_invalid_per_page(self) -> None:
         with pytest.raises(SystemExit):
             parse_args(["--per-page", "abc"])
+
+    def test_parse_args_http_flag_default(self) -> None:
+        args = parse_args(["--http"])
+        assert args.http == "127.0.0.1:8000"
+
+    def test_parse_args_http_flag_custom(self) -> None:
+        args = parse_args(["--http", "0.0.0.0:3000"])
+        assert args.http == "0.0.0.0:3000"
 
 
 class TestMain:
@@ -284,3 +293,69 @@ class TestMain:
         assert result == 0
         # Should not override existing value when no CLI arg provided
         assert os.environ["PR_FETCH_MAX_PAGES"] == "100"
+
+    @patch("mcp_github_pr_review.cli.PRReviewServer")
+    @patch("mcp_github_pr_review.cli.load_dotenv")
+    @patch("mcp_github_pr_review.cli.asyncio.run")
+    def test_main_http_mode_default(
+        self, mock_asyncio_run: Mock, mock_load_dotenv: Mock, mock_server_class: Mock
+    ) -> None:
+        mock_server = MagicMock()
+        mock_server_class.return_value = mock_server
+
+        result = main(["--http"])
+
+        assert result == 0
+        mock_asyncio_run.assert_called_once_with(
+            mock_server.run_http(host="127.0.0.1", port=8000)
+        )
+
+    @patch("mcp_github_pr_review.cli.PRReviewServer")
+    @patch("mcp_github_pr_review.cli.load_dotenv")
+    @patch("mcp_github_pr_review.cli.asyncio.run")
+    def test_main_http_mode_custom_host_port(
+        self, mock_asyncio_run: Mock, mock_load_dotenv: Mock, mock_server_class: Mock
+    ) -> None:
+        mock_server = MagicMock()
+        mock_server_class.return_value = mock_server
+
+        result = main(["--http", "0.0.0.0:3000"])  # noqa: S104
+
+        assert result == 0
+        mock_asyncio_run.assert_called_once_with(
+            mock_server.run_http(host="0.0.0.0", port=3000)  # noqa: S104
+        )
+
+    @patch("mcp_github_pr_review.cli.PRReviewServer")
+    @patch("mcp_github_pr_review.cli.load_dotenv")
+    def test_main_http_mode_invalid_port(
+        self,
+        mock_load_dotenv: Mock,
+        mock_server_class: Mock,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        mock_server = MagicMock()
+        mock_server_class.return_value = mock_server
+
+        result = main(["--http", "127.0.0.1:abc"])
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "Invalid port" in captured.err
+
+    @patch("mcp_github_pr_review.cli.PRReviewServer")
+    @patch("mcp_github_pr_review.cli.load_dotenv")
+    def test_main_http_mode_missing_port(
+        self,
+        mock_load_dotenv: Mock,
+        mock_server_class: Mock,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        mock_server = MagicMock()
+        mock_server_class.return_value = mock_server
+
+        result = main(["--http", "127.0.0.1"])
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "requires HOST:PORT format" in captured.err

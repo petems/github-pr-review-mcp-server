@@ -47,7 +47,15 @@ def _positive_int(value: str) -> int:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="mcp-github-pr-review",
-        description="Run the GitHub PR Review MCP server over stdio.",
+        description="Run the GitHub PR Review MCP server over stdio or HTTP.",
+    )
+    parser.add_argument(
+        "--http",
+        type=str,
+        nargs="?",
+        const="127.0.0.1:8000",
+        metavar="HOST:PORT",
+        help="Run HTTP server on HOST:PORT (default: 127.0.0.1:8000)",
     )
     parser.add_argument(
         "--env-file",
@@ -95,7 +103,21 @@ def main(argv: list[str] | None = None) -> int:
     server = PRReviewServer()
     try:
         with _temporary_env_overrides(env_overrides):
-            asyncio.run(server.run())
+            if args.http:
+                # Parse host:port
+                if ":" in args.http:
+                    host, port_str = args.http.rsplit(":", 1)
+                    try:
+                        port = int(port_str)
+                    except ValueError:
+                        print(f"Error: Invalid port '{port_str}'", file=sys.stderr)
+                        return 1
+                else:
+                    print("Error: --http requires HOST:PORT format", file=sys.stderr)
+                    return 1
+                asyncio.run(server.run_http(host=host, port=port))
+            else:
+                asyncio.run(server.run())
     except KeyboardInterrupt:
         return 130
     except Exception:  # pragma: no cover - surfaces unexpected errors
