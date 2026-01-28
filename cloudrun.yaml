@@ -1,0 +1,102 @@
+# Google Cloud Run service configuration
+# Deploy with: gcloud run services replace cloudrun.yaml
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: github-pr-review-mcp
+  labels:
+    cloud.googleapis.com/location: us-central1
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/ingress-status: all
+spec:
+  template:
+    metadata:
+      annotations:
+        # Scaling
+        autoscaling.knative.dev/minScale: '0'
+        autoscaling.knative.dev/maxScale: '10'
+        # CPU allocation
+        run.googleapis.com/cpu-throttling: 'true'
+        # Startup probe
+        run.googleapis.com/startup-cpu-boost: 'true'
+    spec:
+      # Container configuration
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      serviceAccountName: PROJECT_ID-compute@developer.gserviceaccount.com
+
+      containers:
+      - name: mcp-server
+        image: gcr.io/PROJECT_ID/github-pr-review-mcp:latest
+
+        ports:
+        - name: http1
+          containerPort: 8080
+
+        env:
+        # Server Mode
+        - name: MCP_MODE
+          value: "http"
+        - name: MCP_HOST
+          value: "0.0.0.0"
+        - name: MCP_PORT
+          value: "8080"
+
+        # Authentication (use Secret Manager for production!)
+        - name: MCP_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mcp-secret-key
+              key: latest
+        - name: MCP_ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: mcp-admin-token
+              key: latest
+
+        # Rate Limiting
+        - name: RATE_LIMIT_ENABLED
+          value: "true"
+        - name: RATE_LIMIT_REQUESTS_PER_MINUTE
+          value: "60"
+        - name: RATE_LIMIT_BURST
+          value: "10"
+
+        # CORS
+        - name: CORS_ENABLED
+          value: "true"
+        - name: CORS_ALLOW_ORIGINS
+          value: "*"  # Restrict this in production!
+        - name: CORS_ALLOW_CREDENTIALS
+          value: "true"
+
+        # Resource limits
+        resources:
+          limits:
+            cpu: '1'
+            memory: 512Mi
+
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 0
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+  traffic:
+  - percent: 100
+    latestRevision: true
