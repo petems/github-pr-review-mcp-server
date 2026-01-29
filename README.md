@@ -156,14 +156,28 @@ Run these from the repo root so `$(pwd)` points to this project.
 #### Claude Code (CLI)
 
 ```bash
-# Minimal (pass env vars if needed)
-claude mcp add pr-review -s user -- \
-  uv run --project "$(pwd)" -- mcp-github-pr-review
+# Recommended: Using installed tool with environment variable from shell
+claude mcp add pr-review --scope user --transport stdio --env GITHUB_TOKEN="${GITHUB_TOKEN}" -- \
+  mcp-github-pr-review
 
-# Example with env var (GitHub token)
-claude mcp add pr-review -s user -e GITHUB_TOKEN="$GITHUB_TOKEN" -- \
-  uv run --project "$(pwd)" -- mcp-github-pr-review
+# With pagination limits
+claude mcp add pr-review --scope user --transport stdio --env GITHUB_TOKEN="${GITHUB_TOKEN}" -- \
+  mcp-github-pr-review --max-comments 500 --max-pages 20
+
+# Using uv run from project directory
+claude mcp add pr-review --scope user --transport stdio --env GITHUB_TOKEN="${GITHUB_TOKEN}" -- \
+  uv run --project "$(pwd)" mcp-github-pr-review
+
+# Using short flags
+claude mcp add pr-review -s user -t stdio -e GITHUB_TOKEN="${GITHUB_TOKEN}" -- \
+  mcp-github-pr-review
 ```
+
+**Important:**
+- Format: `claude mcp add SERVER_NAME [OPTIONS] -- COMMAND [ARGS]`
+- Server name comes FIRST, before any options
+- All options (`--scope`, `--transport`, `--env`) come after server name but before `--`
+- Supported MCP server flags: `--max-comments`, `--max-pages`, `--per-page`, `--max-retries`, `--env-file`
 
 #### Codex CLI
 
