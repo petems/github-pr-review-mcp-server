@@ -4,7 +4,10 @@
       "Bash(uv run pytest:*)",
       "Bash(uv run python:*)",
       "Bash(uv run:*)",
-      "Bash(make compile-check:*)"
+      "Bash(make compile-check:*)",
+      "Bash(make coverage:*)",
+      "Skill(ralph-loop:ralph-loop)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []
