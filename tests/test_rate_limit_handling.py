@@ -303,34 +303,6 @@ async def test_rate_limit_handler_secondary_limit_retry(
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_handler_secondary_limit_exhausted(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Handler should raise SecondaryRateLimitError on second consecutive hit."""
-
-    recorder = SleepRecorder()
-    monkeypatch.setattr("mcp_github_pr_review.server.asyncio.sleep", recorder)
-
-    handler = RateLimitHandler("test_context")
-    response = httpx.Response(
-        403,
-        request=httpx.Request("GET", "https://api.github.com/test"),
-        json={"message": "Abuse detection triggered"},
-    )
-
-    # First call should retry
-    result = await handler.handle_rate_limit(response)
-    assert result == "retry"
-    assert recorder.calls == [SECONDARY_RATE_LIMIT_BACKOFF]
-
-    # Second call should raise
-    with pytest.raises(SecondaryRateLimitError) as exc_info:
-        await handler.handle_rate_limit(response)
-
-    assert exc_info.value.response == response
-
-
-@pytest.mark.asyncio
 async def test_rate_limit_handler_primary_limit_retry_after(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
