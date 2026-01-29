@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import html
 import ipaddress
 import json
@@ -71,6 +72,9 @@ def escape_html_safe(text: Any) -> str:
 
 def _is_loopback_host(host: str) -> bool:
     host_value = host.strip().lower()
+    # Strip IPv6 brackets (e.g., '[::1]' -> '::1')
+    if host_value.startswith("[") and host_value.endswith("]"):
+        host_value = host_value[1:-1]
     if host_value == "localhost":
         return True
     try:
@@ -1562,10 +1566,20 @@ class PRReviewServer:
             async def mcp_endpoint(scope, receive, send):  # type: ignore[no-untyped-def]  # pragma: no cover
                 if auth_token:  # pragma: no cover
                     headers = dict(scope.get("headers") or [])
-                    provided = headers.get(b"authorization", b"")
-                    if isinstance(provided, bytes | bytearray):  # pragma: no cover
-                        provided = provided.decode("utf-8", "ignore")
-                    if provided != f"Bearer {auth_token}":  # pragma: no cover
+                    auth_header = headers.get(b"authorization", b"")
+                    if isinstance(auth_header, bytes | bytearray):  # pragma: no cover
+                        auth_header = auth_header.decode("utf-8", "ignore")
+
+                    is_authorized = False
+                    # Case-insensitive Bearer scheme check per RFC 6750
+                    if auth_header.lower().startswith("bearer "):
+                        provided_token = auth_header[
+                            7:
+                        ]  # Extract token after "Bearer "
+                        # Use constant-time comparison to mitigate timing attacks
+                        is_authorized = hmac.compare_digest(provided_token, auth_token)
+
+                    if not is_authorized:  # pragma: no cover
                         await send(
                             {
                                 "type": "http.response.start",

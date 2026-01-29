@@ -306,9 +306,8 @@ class TestMain:
         result = main(["--http"])
 
         assert result == 0
-        mock_asyncio_run.assert_called_once_with(
-            mock_server.run_http(host="127.0.0.1", port=8000)
-        )
+        mock_server.run_http.assert_called_once_with(host="127.0.0.1", port=8000)
+        mock_asyncio_run.assert_called_once_with(mock_server.run_http.return_value)
 
     @patch("mcp_github_pr_review.cli.PRReviewServer")
     @patch("mcp_github_pr_review.cli.load_dotenv")
@@ -322,9 +321,8 @@ class TestMain:
         result = main(["--http", "0.0.0.0:3000"])  # noqa: S104
 
         assert result == 0
-        mock_asyncio_run.assert_called_once_with(
-            mock_server.run_http(host="0.0.0.0", port=3000)  # noqa: S104
-        )
+        mock_server.run_http.assert_called_once_with(host="0.0.0.0", port=3000)  # noqa: S104
+        mock_asyncio_run.assert_called_once_with(mock_server.run_http.return_value)
 
     @patch("mcp_github_pr_review.cli.PRReviewServer")
     @patch("mcp_github_pr_review.cli.load_dotenv")

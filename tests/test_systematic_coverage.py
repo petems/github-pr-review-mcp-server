@@ -72,6 +72,15 @@ def test_server_is_loopback_invalid():
     from mcp_github_pr_review.server import _is_loopback_host
 
     assert _is_loopback_host("github.com") is False
+
+
+def test_server_is_loopback_ipv6_with_brackets():
+    """Test _is_loopback_host recognizes IPv6 loopback with brackets."""
+    from mcp_github_pr_review.server import _is_loopback_host
+
+    assert _is_loopback_host("[::1]") is True
+    assert _is_loopback_host("::1") is True
+    assert _is_loopback_host("[::1]".upper()) is True
     assert _is_loopback_host("invalid") is False
 
 

@@ -12,7 +12,6 @@ import pytest
 from mcp_github_pr_review.server import (
     SECONDARY_RATE_LIMIT_BACKOFF,
     RateLimitHandler,
-    SecondaryRateLimitError,
     _calculate_backoff_delay,
     fetch_pr_comments,
     fetch_pr_comments_graphql,
