@@ -2,7 +2,6 @@
 
 import importlib
 import os
-import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,11 +32,14 @@ def test_config_get_ge_constraint_none():
 # Test git_pr_resolver.py lines 72, 103-104, 279-282
 def test_git_pr_resolver_get_repo_not_git():
     """Test _get_repo raises ValueError when not a git repo."""
+    from dulwich.errors import NotGitRepository
+
     from mcp_github_pr_review.git_pr_resolver import _get_repo
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with patch("mcp_github_pr_review.git_pr_resolver.Repo.discover") as mock_discover:
+        mock_discover.side_effect = NotGitRepository("/fake/path")
         with pytest.raises(ValueError, match="Not a git repository"):
-            _get_repo(cwd=tmpdir)
+            _get_repo(cwd="/fake/path")
 
 
 # Test server.py lines 54-55, 73-79 (version fallback and loopback check)
