@@ -1,5 +1,6 @@
 """Systematic tests to cover all remaining uncovered lines."""
 
+import builtins
 import importlib
 import os
 from unittest.mock import MagicMock, patch
@@ -145,7 +146,7 @@ async def test_server_run_http_import_error(capsys):
 
     server = PRReviewServer()
 
-    original_import = __builtins__["__import__"]
+    original_import = builtins.__import__
 
     def mock_import(name, *args, **kwargs):
         if name in ["anyio", "uvicorn", "starlette"]:
