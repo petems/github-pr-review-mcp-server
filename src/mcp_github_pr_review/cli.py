@@ -47,7 +47,15 @@ def _positive_int(value: str) -> int:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="mcp-github-pr-review",
-        description="Run the GitHub PR Review MCP server over stdio.",
+        description="Run the GitHub PR Review MCP server over stdio or HTTP.",
+    )
+    parser.add_argument(
+        "--http",
+        type=str,
+        nargs="?",
+        const="127.0.0.1:8000",
+        metavar="HOST:PORT",
+        help="Run HTTP server on HOST:PORT (default: 127.0.0.1:8000)",
     )
     parser.add_argument(
         "--env-file",
@@ -95,7 +103,29 @@ def main(argv: list[str] | None = None) -> int:
     server = PRReviewServer()
     try:
         with _temporary_env_overrides(env_overrides):
-            asyncio.run(server.run())
+            if args.http:
+                # Parse host:port
+                try:
+                    raw_http = args.http.strip()
+                    host, port_str = raw_http.rsplit(":", 1)
+                    host = host.strip()
+                    port_str = port_str.strip()
+                    if not host:
+                        raise ValueError("Host cannot be empty.")
+                    port = int(port_str)
+                    if not (1 <= port <= 65535):
+                        raise ValueError("Port out of range.")
+                except ValueError:
+                    print(
+                        f"Error: Invalid --http value '{args.http}'. "
+                        "Expected HOST:PORT format with a non-empty host and "
+                        "port between 1 and 65535.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                asyncio.run(server.run_http(host=host, port=port))
+            else:
+                asyncio.run(server.run())
     except KeyboardInterrupt:
         return 130
     except Exception:  # pragma: no cover - surfaces unexpected errors

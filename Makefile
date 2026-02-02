@@ -1,4 +1,4 @@
-.PHONY: compile-check lint format test sync
+.PHONY: compile-check lint format test coverage sync
 
 # Use uv consistently to avoid host Python differences
 
@@ -13,6 +13,9 @@ format:
 
 test:
 	uv run pytest -q
+
+coverage:
+	uv run pytest --cov=. --cov-report=html --cov-report=term --cov-fail-under=90
 
 sync:
 	uv sync --dev

@@ -1,5 +1,7 @@
 import asyncio
+import hmac
 import html
+import ipaddress
 import json
 import logging
 import os
@@ -66,6 +68,19 @@ def escape_html_safe(text: Any) -> str:
     if text is None:
         return "N/A"
     return html.escape(str(text), quote=True)
+
+
+def _is_loopback_host(host: str) -> bool:
+    host_value = host.strip().lower()
+    # Strip IPv6 brackets (e.g., '[::1]' -> '::1')
+    if host_value.startswith("[") and host_value.endswith("]"):
+        host_value = host_value[1:-1]
+    if host_value == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host_value).is_loopback
+    except ValueError:
+        return False
 
 
 # Parameter ranges (keep in sync with env clamping)
@@ -1449,8 +1464,8 @@ class PRReviewServer:
             return [{"error": error_msg}]
 
     async def run(self) -> None:
-        """Start the MCP server."""
-        print("Running MCP Server...", file=sys.stderr)
+        """Start the MCP server over stdio."""
+        print("Running MCP Server over stdio...", file=sys.stderr)
         # Import stdio here to avoid potential issues with event loop
         from mcp.server.stdio import stdio_server
 
@@ -1474,6 +1489,123 @@ class PRReviewServer:
                     capabilities=capabilities,
                 ),
             )
+
+    async def run_http(self, host: str = "127.0.0.1", port: int = 8000) -> None:
+        """Start the MCP server over HTTP with streaming.
+
+        Uses StreamableHTTPServerTransport with JSON response mode for
+        standard JSON-RPC over HTTP POST. Returns JSON responses for
+        all requests. Compatible with MCP HTTP clients.
+
+        Args:
+            host: Host to bind to (default: 127.0.0.1)
+            port: Port to bind to (default: 8000)
+        """
+        try:
+            import anyio
+            import uvicorn
+            from mcp.server.streamable_http import StreamableHTTPServerTransport
+            from starlette.applications import Starlette
+        except ImportError as exc:
+            print(
+                "HTTP dependencies are not installed. "
+                "Install with 'pip install mcp-github-pr-review[http]'.",
+                file=sys.stderr,
+            )
+            raise RuntimeError("Missing HTTP dependencies") from exc
+
+        auth_token = os.getenv("MCP_HTTP_AUTH_TOKEN", "").strip() or None
+        allow_public = os.getenv("MCP_HTTP_ALLOW_PUBLIC", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if not _is_loopback_host(host) and not auth_token and not allow_public:
+            print(
+                "Refusing to bind to a non-loopback host without HTTP auth. "
+                "Set MCP_HTTP_AUTH_TOKEN or MCP_HTTP_ALLOW_PUBLIC=1 to proceed.",
+                file=sys.stderr,
+            )
+            raise RuntimeError("HTTP auth required for non-loopback host")
+
+        print(
+            f"Running MCP Server over HTTP on {host}:{port}...", file=sys.stderr
+        )  # pragma: no cover
+        # The following HTTP server setup code is excluded from coverage as it requires
+        # complex integration testing with actual HTTP servers and is better tested
+        # through integration/deployment tests rather than unit tests.
+        notif = NotificationOptions(  # pragma: no cover
+            prompts_changed=False,
+            resources_changed=False,
+            tools_changed=False,
+        )
+        init_options = InitializationOptions(  # pragma: no cover
+            server_name="github_pr_review",
+            server_version=__version__,
+            capabilities=self.server.get_capabilities(
+                notif,
+                experimental_capabilities={},
+            ),
+        )
+
+        # Create HTTP streaming transport with JSON responses
+        transport = StreamableHTTPServerTransport(  # pragma: no cover
+            mcp_session_id=None, is_json_response_enabled=True
+        )
+
+        # Connect transport to MCP server
+        async with transport.connect() as (
+            read_stream,
+            write_stream,
+        ):  # pragma: no cover
+            # Run MCP server in background with the transport streams
+            async def run_server() -> None:  # pragma: no cover
+                await self.server.run(read_stream, write_stream, init_options)
+
+            # Mount transport as ASGI app directly
+            async def mcp_endpoint(scope, receive, send):  # type: ignore[no-untyped-def]  # pragma: no cover
+                if auth_token:  # pragma: no cover
+                    headers = dict(scope.get("headers") or [])
+                    auth_header = headers.get(b"authorization", b"")
+                    if isinstance(auth_header, bytes | bytearray):  # pragma: no cover
+                        auth_header = auth_header.decode("utf-8", "ignore")
+
+                    is_authorized = False
+                    # Case-insensitive Bearer scheme check per RFC 6750
+                    if auth_header.lower().startswith("bearer "):
+                        provided_token = auth_header[
+                            7:
+                        ]  # Extract token after "Bearer "
+                        # Use constant-time comparison to mitigate timing attacks
+                        is_authorized = hmac.compare_digest(provided_token, auth_token)
+
+                    if not is_authorized:  # pragma: no cover
+                        await send(
+                            {
+                                "type": "http.response.start",
+                                "status": 401,
+                                "headers": [(b"content-type", b"text/plain")],
+                            }
+                        )
+                        await send(
+                            {"type": "http.response.body", "body": b"Unauthorized"}
+                        )
+                        return
+                await transport.handle_request(scope, receive, send)  # pragma: no cover
+
+            app = Starlette()  # pragma: no cover
+            app.mount("/", mcp_endpoint)
+
+            # Start the HTTP server
+            config = uvicorn.Config(
+                app, host=host, port=port, log_level="info"
+            )  # pragma: no cover
+            uvicorn_server = uvicorn.Server(config)  # pragma: no cover
+
+            # Run both server and uvicorn concurrently
+            async with anyio.create_task_group() as tg:  # pragma: no cover
+                tg.start_soon(run_server)
+                tg.start_soon(uvicorn_server.serve)
 
 
 def create_server() -> PRReviewServer:

@@ -36,8 +36,12 @@ uv run pytest tests/test_git_pr_resolver.py -v
 # Syntax compile check (fail fast on SyntaxError)
 make compile-check
 
-# Run the MCP server
+# Run the MCP server (stdio mode - default)
 uv run mcp-github-pr-review
+
+# Run the MCP server (HTTP mode for remote access)
+uv run mcp-github-pr-review --http
+uv run mcp-github-pr-review --http 0.0.0.0:3000  # Custom host/port
 
 # Pre-commit quality check (format, lint, type, syntax, test)
 uv run ruff format . && uv run ruff check --fix . && uv run mypy . && make compile-check && uv run pytest
@@ -45,6 +49,17 @@ uv run ruff format . && uv run ruff check --fix . && uv run mypy . && make compi
 # Check formatting compliance (CI/validation)
 uv run ruff format --check . && uv run ruff check . && uv run mypy . && make compile-check && uv run pytest
 ```
+
+## HTTP Transport
+
+The server supports both stdio (default) and HTTP transport:
+
+- **stdio (default)**: For most local agentic clients (Claude Code, Codex, Cursor). This server is Python-based (not an `npx`/Node workflow).
+- **HTTP**: For remote access or custom MCP clients
+
+HTTP mode uses `StreamableHTTPServerTransport` with JSON-RPC over HTTP POST. Authentication is handled server-side via `GITHUB_TOKEN` environment variable - clients don't need GitHub credentials.
+
+See [HTTP_TRANSPORT.md](HTTP_TRANSPORT.md) for configuration details.
 
 ## Architecture Overview
 
@@ -84,6 +99,10 @@ Optional tuning parameters:
 - `PR_FETCH_MAX_COMMENTS` (default 2000): Safety limit on total comments
 - `HTTP_PER_PAGE` (default 100): GitHub API page size
 - `HTTP_MAX_RETRIES` (default 3): Retry limit for transient errors
+
+HTTP access control (for `--http` mode):
+- `MCP_HTTP_AUTH_TOKEN`: Require `Authorization: Bearer <token>` from clients
+- `MCP_HTTP_ALLOW_PUBLIC=1`: Allow binding to non-loopback hosts without auth
 
 ### File Structure
 
