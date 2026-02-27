@@ -1,6 +1,10 @@
 """Security tests for HTML escaping and XSS prevention in markdown generation."""
 
-from mcp_github_pr_review.server import escape_html_safe, generate_markdown
+from mcp_github_pr_review.server import (
+    _sanitize_comment_bodies,
+    escape_html_safe,
+    generate_markdown,
+)
 
 
 class TestHTMLEscaping:
@@ -183,6 +187,32 @@ class TestHTMLEscaping:
         assert "<img" not in result
         assert "&lt;script&gt;" in result
         assert "&lt;img src=x onerror=alert(1)&gt;" in result
+
+    def test_summary_text_from_collapsed_details_is_escaped_in_markdown(self) -> None:
+        """Summary extracted from <details> should still be HTML-escaped in markdown."""
+        comments = [
+            {
+                "user": {"login": "user"},
+                "path": "file.py",
+                "line": 3,
+                "body": (
+                    "<details>"
+                    "<summary><script>alert('xss')</script>Summary</summary>"
+                    "hidden"
+                    "</details>"
+                ),
+            }
+        ]
+        sanitized_comments = _sanitize_comment_bodies(
+            comments, include_collapsed_details=False
+        )
+        result = generate_markdown(sanitized_comments)
+
+        assert "<script>" not in result
+        assert "&lt;script&gt;" not in result
+        assert "alert(&#x27;xss&#x27;)Summary" in result
+        assert "Summary" in result
+        assert "[Folded details omitted]" in result
 
 
 class TestEdgeCasesAndErrorHandling:

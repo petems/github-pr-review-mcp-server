@@ -151,6 +151,10 @@ def _float_conf(name: str, default: float, min_v: float, max_v: float) -> float:
 # Type alias for comment results (dict format for backwards compatibility)
 CommentResult = dict[str, Any]
 
+# Matches opening/closing <details>/<summary> tags (case-insensitive).
+COLLAPSIBLE_TAG_RE = re.compile(r"(?is)<\s*(/?)\s*(details|summary)\b[^>]*>")
+HTML_TAG_RE = re.compile(r"(?is)<[^>]+>")
+
 
 # Rate limit configuration constants
 SECONDARY_RATE_LIMIT_BACKOFF = 60.0
@@ -944,6 +948,128 @@ async def fetch_pr_comments(
         raise
 
 
+def _strip_collapsed_details(body: Any) -> tuple[str, bool]:
+    """Strip content inside <details> blocks while preserving summary + omission note.
+
+    Returns:
+        tuple[str, bool]: Sanitized body text and whether any collapsed content
+            was detected/removed.
+    """
+
+    def _normalize_summary_text(summary_raw: str) -> str:
+        summary_without_tags = HTML_TAG_RE.sub("", summary_raw)
+        return re.sub(r"\s+", " ", summary_without_tags).strip()
+
+    def _fold_replacement(summary_text: str) -> str:
+        if summary_text:
+            return f"{summary_text}\n[Folded details omitted]"
+        return "[Folded details omitted]"
+
+    body_text = "" if body is None else str(body)
+    output_parts: list[str] = []
+    last_idx = 0
+    had_folded_content = False
+
+    # Each frame tracks summary capture state for a <details> block.
+    stack: list[dict[str, Any]] = []
+
+    for match in COLLAPSIBLE_TAG_RE.finditer(body_text):
+        between = body_text[last_idx : match.start()]
+        if not stack:
+            output_parts.append(between)
+        else:
+            top = stack[-1]
+            if bool(top["in_summary"]):
+                summary_parts = top["summary_parts"]
+                if isinstance(summary_parts, list):
+                    summary_parts.append(between)
+
+        is_closing_tag = match.group(1) == "/"
+        tag_name = match.group(2).lower()
+
+        if tag_name == "details":
+            if is_closing_tag:
+                if stack:
+                    frame = stack.pop()
+                    if not stack:
+                        summary_raw = "".join(frame["summary_parts"])
+                        summary_text = _normalize_summary_text(summary_raw)
+                        output_parts.append(_fold_replacement(summary_text))
+                else:
+                    # Preserve unmatched closing tag outside details blocks.
+                    output_parts.append(match.group(0))
+            else:
+                had_folded_content = True
+                stack.append(
+                    {"summary_parts": [], "in_summary": False, "summary_seen": False}
+                )
+        elif tag_name == "summary":
+            if stack:
+                top = stack[-1]
+                if is_closing_tag:
+                    if bool(top["in_summary"]):
+                        top["in_summary"] = False
+                elif not bool(top["summary_seen"]):
+                    top["in_summary"] = True
+                    top["summary_seen"] = True
+            else:
+                # Preserve summary tags when they appear outside details blocks.
+                output_parts.append(match.group(0))
+
+        last_idx = match.end()
+
+    tail = body_text[last_idx:]
+    if not stack:
+        output_parts.append(tail)
+    else:
+        # Remaining text is inside an unclosed details block; treat it as folded.
+        top = stack[-1]
+        if bool(top["in_summary"]):
+            summary_parts = top["summary_parts"]
+            if isinstance(summary_parts, list):
+                summary_parts.append(tail)
+
+        top_level_frame = stack[0]
+        summary_raw = "".join(top_level_frame["summary_parts"])
+        summary_text = _normalize_summary_text(summary_raw)
+        output_parts.append(_fold_replacement(summary_text))
+        had_folded_content = True
+
+    return "".join(output_parts), had_folded_content
+
+
+def _sanitize_comment_bodies(
+    comments: Sequence[CommentResult], include_collapsed_details: bool
+) -> list[CommentResult]:
+    """Sanitize comment bodies by removing collapsed <details> blocks when enabled."""
+    sanitized_comments = [dict(comment) for comment in comments]
+    if include_collapsed_details:
+        return sanitized_comments
+
+    folded_comment_count = 0
+    for comment in sanitized_comments:
+        if "error" in comment:
+            continue
+        if "body" not in comment:
+            continue
+        stripped_body, had_folded_content = _strip_collapsed_details(
+            comment.get("body")
+        )
+        if had_folded_content:
+            comment["body"] = stripped_body
+            folded_comment_count += 1
+
+    if folded_comment_count > 0:
+        logger.info(
+            "Collapsed details removed from review comments",
+            extra={
+                "comments_processed": len(sanitized_comments),
+                "comments_with_collapsed_details": folded_comment_count,
+            },
+        )
+    return sanitized_comments
+
+
 def generate_markdown(comments: Sequence[CommentResult]) -> str:
     """Generates a markdown string from a list of review comments."""
 
@@ -1126,6 +1252,15 @@ class PRReviewServer:
                             "minimum": 0,
                             "maximum": 10,
                         },
+                        "include_collapsed_details": {
+                            "type": "boolean",
+                            "description": (
+                                "Include body content inside GitHub <details> folds. "
+                                "Defaults to false, which keeps summary text and "
+                                "replaces folded content with "
+                                "'[Folded details omitted]'."
+                            ),
+                        },
                     },
                 },
             ),
@@ -1186,7 +1321,8 @@ class PRReviewServer:
             arguments (dict[str, Any]): Tool-specific arguments; expected keys
                 depend on `name` (for example, "pr_url", "per_page",
                 "max_pages", "max_comments", "max_retries",
-                "select_strategy", "owner", "repo", "branch", and "output" for
+                "include_collapsed_details", "select_strategy",
+                "owner", "repo", "branch", and "output" for
                 "fetch_pr_review_comments").
 
         Returns:
@@ -1306,11 +1442,21 @@ class PRReviewServer:
                     max_pages=args_dict.get("max_pages"),
                     max_comments=args_dict.get("max_comments"),
                     max_retries=args_dict.get("max_retries"),
+                    include_collapsed_details=args_dict.get(
+                        "include_collapsed_details", False
+                    ),
                     select_strategy=args_dict.get("select_strategy"),
                     owner=args_dict.get("owner"),
                     repo=args_dict.get("repo"),
                     branch=args_dict.get("branch"),
                 )
+            )
+            include_collapsed_details = args_dict.get(
+                "include_collapsed_details", False
+            )
+            sanitized_comments = _sanitize_comment_bodies(
+                comments,
+                include_collapsed_details=include_collapsed_details,
             )
 
             output = args_dict.get("output", "markdown")
@@ -1318,10 +1464,12 @@ class PRReviewServer:
             # Build responses according to requested format (default markdown)
             results: list[TextContent] = []
             if output in ("json", "both"):
-                results.append(TextContent(type="text", text=json.dumps(comments)))
+                results.append(
+                    TextContent(type="text", text=json.dumps(sanitized_comments))
+                )
             if output in ("markdown", "both"):
                 try:
-                    md = generate_markdown(comments)
+                    md = generate_markdown(sanitized_comments)
                 except (AttributeError, KeyError, TypeError, IndexError) as exc:
                     traceback.print_exc(file=sys.stderr)
                     md = f"# Error\n\nFailed to generate markdown from comments: {exc}"
@@ -1379,6 +1527,7 @@ class PRReviewServer:
         max_pages: int | None = None,
         max_comments: int | None = None,
         max_retries: int | None = None,
+        include_collapsed_details: bool = False,
         select_strategy: str | None = None,
         owner: str | None = None,
         repo: str | None = None,
@@ -1409,6 +1558,10 @@ class PRReviewServer:
                 fetch; honored by the underlying fetcher.
             max_retries (int | None): Maximum retry attempts for
                 network/HTTP errors; forwarded to the fetcher.
+            include_collapsed_details (bool): Whether folded details
+                should be preserved in comment bodies. Accepted for API
+                consistency and forwarded by call handlers; output
+                sanitization is applied in handle_call_tool.
             select_strategy (str | None): Strategy used when resolving
                 an open PR URL (e.g., "branch"); used only if pr_url
                 is None.
@@ -1430,6 +1583,7 @@ class PRReviewServer:
             f"Tool 'fetch_pr_review_comments' called with pr_url: {pr_url}",
             file=sys.stderr,
         )
+        _ = include_collapsed_details
         try:
             # If URL not provided, attempt auto-resolution via git + GitHub
             if not pr_url:

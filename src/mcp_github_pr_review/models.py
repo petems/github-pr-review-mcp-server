@@ -206,6 +206,7 @@ class FetchPRReviewCommentsArgs(BaseModel):
     max_pages: int | None = Field(default=None, ge=1, le=200)
     max_comments: int | None = Field(default=None, ge=100, le=100000)
     max_retries: int | None = Field(default=None, ge=0, le=10)
+    include_collapsed_details: bool = False
     owner: str | None = None
     repo: str | None = None
     branch: str | None = None

@@ -219,11 +219,13 @@ Fetches all review comments from a given GitHub pull request URL. The tool retur
     -   `max_pages` (int, optional): Safety cap on pages. Defaults from env `PR_FETCH_MAX_PAGES`.
     -   `max_comments` (int, optional): Safety cap on total comments. Defaults from env `PR_FETCH_MAX_COMMENTS`.
     -   `max_retries` (int, optional): Retry budget for transient errors. Defaults from env `HTTP_MAX_RETRIES`.
+    -   `include_collapsed_details` (bool, optional): Whether to include content inside GitHub `<details>` folds. Default is `false`, which keeps the `<summary>` text and inserts `[Folded details omitted]`.
 
 -   **Returns:**
     -   When `output="markdown"` (default): a single text item containing Markdown.
     -   When `output="json"`: a single text item containing a JSON string with the raw comments list.
     -   When `output="both"`: two text items in order — first JSON, then Markdown.
+    -   By default, folded `<details>` content is removed from comment bodies in all output modes to reduce context-window bloat.
 
 Example (Markdown default):
 ```json
@@ -252,6 +254,15 @@ Resolves the open PR URL for the current branch using git detection.
     -   `branch` (str, optional): Override branch name for PR resolution.
 -   **Returns:**
     -   The resolved PR URL as a string.
+
+## Roadmap: Targeted Comment Retrieval
+
+To better handle very large automated review comments (for example tools that embed huge collapsed sections), the next planned phases are:
+
+1. `list_pr_review_comments` for lightweight metadata-only listing.
+2. `fetch_pr_review_comment` to fetch a single selected comment by ID.
+3. `fetch_pr_review_comments_by_id` for bounded targeted batches.
+4. Guidance to list first, rank/select, then fetch only needed comments.
 
 ### GitHub Token Scopes
 

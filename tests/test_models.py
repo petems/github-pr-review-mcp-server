@@ -472,6 +472,7 @@ class TestFetchPRReviewCommentsArgs:
         assert args.max_pages is None
         assert args.max_comments is None
         assert args.max_retries is None
+        assert args.include_collapsed_details is False
         assert args.owner is None
         assert args.repo is None
         assert args.branch is None
@@ -620,6 +621,11 @@ class TestFetchPRReviewCommentsArgs:
         with pytest.raises(ValidationError) as exc_info:
             FetchPRReviewCommentsArgs(extra_field="value")  # type: ignore
         assert "Extra inputs are not permitted" in str(exc_info.value)
+
+    def test_accepts_include_collapsed_details(self) -> None:
+        """Test include_collapsed_details boolean flag."""
+        args = FetchPRReviewCommentsArgs(include_collapsed_details=True)
+        assert args.include_collapsed_details is True
 
 
 class TestResolveOpenPrUrlArgs:
