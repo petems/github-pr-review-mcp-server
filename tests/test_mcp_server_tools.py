@@ -243,6 +243,86 @@ async def test_handle_call_tool_fetch_output_both(
 
 
 @pytest.mark.asyncio
+async def test_handle_call_tool_strips_collapsed_details_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_server: PRReviewServer,
+) -> None:
+    async def mock_fetch(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "user": {"login": "alice"},
+                "path": "file.py",
+                "line": 12,
+                "body": (
+                    "Start\n"
+                    "<details><summary>Long tool output</summary>\n"
+                    "secret hidden text\n"
+                    "</details>\n"
+                    "End"
+                ),
+                "diff_hunk": "@@\n+code\n",
+            }
+        ]
+
+    monkeypatch.setattr(mcp_server, "fetch_pr_review_comments", mock_fetch)
+
+    result = await mcp_server.handle_call_tool(
+        "fetch_pr_review_comments",
+        {"pr_url": "https://github.com/a/b/pull/1", "output": "both"},
+    )
+
+    assert len(result) == 2
+    json_text = result[0].text
+    markdown_text = result[1].text
+    assert "secret hidden text" not in json_text
+    assert "Long tool output" in json_text
+    assert "[Folded details omitted]" in json_text
+    assert "secret hidden text" not in markdown_text
+    assert "Long tool output" in markdown_text
+    assert "[Folded details omitted]" in markdown_text
+
+
+@pytest.mark.asyncio
+async def test_handle_call_tool_preserves_collapsed_details_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_server: PRReviewServer,
+) -> None:
+    async def mock_fetch(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "user": {"login": "alice"},
+                "path": "file.py",
+                "line": 12,
+                "body": (
+                    "<details><summary>Long tool output</summary>\n"
+                    "secret hidden text\n"
+                    "</details>"
+                ),
+                "diff_hunk": "@@\n+code\n",
+            }
+        ]
+
+    monkeypatch.setattr(mcp_server, "fetch_pr_review_comments", mock_fetch)
+
+    result = await mcp_server.handle_call_tool(
+        "fetch_pr_review_comments",
+        {
+            "pr_url": "https://github.com/a/b/pull/1",
+            "output": "both",
+            "include_collapsed_details": True,
+        },
+    )
+
+    assert len(result) == 2
+    json_text = result[0].text
+    markdown_text = result[1].text
+    assert "secret hidden text" in json_text
+    assert "[Folded details omitted]" not in json_text
+    assert "secret hidden text" in markdown_text
+    assert "[Folded details omitted]" not in markdown_text
+
+
+@pytest.mark.asyncio
 async def test_fetch_pr_review_comments_invalid_url(
     mcp_server: PRReviewServer,
 ) -> None:
@@ -266,6 +346,7 @@ async def test_handle_call_tool_passes_numeric_overrides(
         max_pages: int | None,
         max_comments: int | None,
         max_retries: int | None,
+        include_collapsed_details: bool,
         select_strategy: str | None,
         owner: str | None,
         repo: str | None,
@@ -278,6 +359,7 @@ async def test_handle_call_tool_passes_numeric_overrides(
                 "max_pages": max_pages,
                 "max_comments": max_comments,
                 "max_retries": max_retries,
+                "include_collapsed_details": include_collapsed_details,
             }
         )
         return []
@@ -302,6 +384,7 @@ async def test_handle_call_tool_passes_numeric_overrides(
         "max_pages": 10,
         "max_comments": 200,
         "max_retries": 2,
+        "include_collapsed_details": False,
     }
     assert result[0].text == "[]"
 
@@ -912,6 +995,20 @@ async def test_resolve_open_pr_url_tool_schema_includes_host(
     assert "description" in host_schema
     assert "github.com" in host_schema["description"].lower()
     assert "enterprise" in host_schema["description"].lower()
+
+
+@pytest.mark.asyncio
+async def test_fetch_pr_review_comments_tool_schema_includes_collapsed_details_flag(
+    mcp_server: PRReviewServer,
+) -> None:
+    """Test fetch_pr_review_comments schema includes collapsed-details control."""
+    tools = await mcp_server.handle_list_tools()
+    fetch_tool = next(t for t in tools if t.name == "fetch_pr_review_comments")
+    assert "include_collapsed_details" in fetch_tool.inputSchema["properties"]
+    include_schema = fetch_tool.inputSchema["properties"]["include_collapsed_details"]
+    assert include_schema["type"] == "boolean"
+    assert "description" in include_schema
+    assert "details" in include_schema["description"].lower()
 
 
 @pytest.mark.asyncio
