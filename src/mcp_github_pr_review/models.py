@@ -301,9 +301,18 @@ class PaginatedReviewCommentsResult(BaseModel):
     next_cursor: str | None = Field(
         default=None,
         alias="nextCursor",
-        serialization_alias="nextCursor",
     )
     total: int | None = Field(default=None, ge=0)
+
+
+ToolErrorCode = Literal[
+    "invalid_arguments",
+    "auth",
+    "not_found",
+    "rate_limited",
+    "upstream",
+    "internal_error",
+]
 
 
 class ToolErrorDetailsModel(BaseModel):
@@ -314,14 +323,7 @@ class ToolErrorDetailsModel(BaseModel):
         validate_assignment=True,
     )
 
-    code: Literal[
-        "invalid_arguments",
-        "auth",
-        "not_found",
-        "rate_limited",
-        "upstream",
-        "internal_error",
-    ]
+    code: ToolErrorCode
     message: str = Field(min_length=1)
     next_steps: list[str] = Field(default_factory=list)
 

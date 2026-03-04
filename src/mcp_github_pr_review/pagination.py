@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 
 
 def encode_cursor(next_url: str) -> str:
@@ -15,7 +16,7 @@ def decode_cursor(cursor: str) -> str:
     """Decode a previously encoded cursor URL."""
     try:
         decoded = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
-    except (ValueError, UnicodeDecodeError) as exc:
+    except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
         raise ValueError("Invalid pagination cursor") from exc
     if not decoded.startswith("http://") and not decoded.startswith("https://"):
         raise ValueError("Invalid pagination cursor")

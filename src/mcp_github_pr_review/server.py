@@ -13,7 +13,7 @@ import traceback
 from collections.abc import Awaitable, Callable, Sequence
 from importlib.metadata import version
 from typing import Any, TypeVar, cast
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -51,6 +51,7 @@ from .models import (
     PaginatedReviewCommentsResult,
     ResolveOpenPrUrlArgs,
     ReviewCommentModel,
+    ToolErrorCode,
     ToolErrorDetailsModel,
     ToolErrorEnvelopeModel,
 )
@@ -964,6 +965,26 @@ def _extract_next_link(link_header: str | None) -> str | None:
     return match.group(1) if match else None
 
 
+def _extract_cursor_pr_context(
+    cursor: str,
+) -> tuple[str | None, str | None, str | None, int | None]:
+    """Best-effort extraction of host/owner/repo/pull context from a cursor URL."""
+    try:
+        cursor_url = decode_cursor(cursor)
+    except ValueError:
+        return None, None, None, None
+
+    parsed = urlparse(cursor_url)
+    match = re.match(r"^/repos/([^/]+)/([^/]+)/pulls/(\d+)/comments$", parsed.path)
+    if not match:
+        return parsed.netloc or None, None, None, None
+
+    owner = unquote(match.group(1))
+    repo = unquote(match.group(2))
+    pull_number = int(match.group(3))
+    return parsed.netloc or None, owner, repo, pull_number
+
+
 async def fetch_pr_comments_page(
     owner: str,
     repo: str,
@@ -1432,11 +1453,11 @@ class PRReviewServer:
         """
 
         def _error_tuple(
-            code: str, message: str, next_steps: list[str]
+            code: ToolErrorCode, message: str, next_steps: list[str]
         ) -> tuple[list[TextContent], dict[str, Any]]:
             envelope = ToolErrorEnvelopeModel(
                 error=ToolErrorDetailsModel(
-                    code=code,  # type: ignore[arg-type]
+                    code=code,
                     message=message,
                     next_steps=next_steps,
                 )
@@ -1841,7 +1862,27 @@ class PRReviewServer:
         path_prefix: str | None = None,
         include_resolved: bool | None = None,
     ) -> PaginatedReviewCommentsResult:
-        """List one page of PR review comments with cursor-based pagination."""
+        """List filtered PR review comments with bounded cursor-based pagination."""
+
+        def _matches_filters(comment: CommentResult) -> bool:
+            if include_resolved is not None:
+                is_resolved = comment.get("is_resolved", False)
+                if bool(is_resolved) is not include_resolved:
+                    return False
+
+            if author:
+                user_data = comment.get("user")
+                login = user_data.get("login") if isinstance(user_data, dict) else None
+                if login != author:
+                    return False
+
+            if path_prefix:
+                path = str(comment.get("path", ""))
+                if not path.startswith(path_prefix):
+                    return False
+
+            return True
+
         resolved_url = pr_url
         request_owner = owner
         request_repo = repo
@@ -1919,54 +1960,77 @@ class PRReviewServer:
                     ],
                 ) from exc
 
-        try:
-            comments, next_cursor = await fetch_pr_comments_page(
-                owner=request_owner or "placeholder-owner",
-                repo=request_repo or "placeholder-repo",
-                pull_number=pull_number or 0,
-                host=request_host or "github.com",
-                limit=limit,
-                cursor=cursor,
-            )
-        except ToolExecutionError:
-            raise
-        except (ValueError, RuntimeError) as exc:
-            raise ToolExecutionError(
-                code="internal_error",
-                message="Unexpected failure while listing review comments.",
-                next_steps=[
-                    "Retry the request.",
-                    "Check server logs if the error persists.",
-                ],
-            ) from exc
+        if cursor and (
+            not request_owner
+            or not request_repo
+            or pull_number is None
+            or not request_host
+        ):
+            (
+                cursor_host,
+                cursor_owner,
+                cursor_repo,
+                cursor_pull_number,
+            ) = _extract_cursor_pr_context(cursor)
+            request_host = request_host or cursor_host
+            request_owner = request_owner or cursor_owner
+            request_repo = request_repo or cursor_repo
+            pull_number = pull_number if pull_number is not None else cursor_pull_number
 
-        filtered_comments: list[CommentResult] = []
-        for comment in comments:
-            if include_resolved is not None:
-                is_resolved = comment.get("is_resolved", False)
-                if bool(is_resolved) is not include_resolved:
-                    continue
+        accumulated_comments: list[CommentResult] = []
+        next_cursor: str | None = cursor
+        current_cursor = cursor
+        pages_fetched = 0
+        max_fetch_pages = _int_conf("PR_FETCH_MAX_PAGES", 50, 1, 200, None)
 
-            if author:
-                user_data = comment.get("user")
-                login = user_data.get("login") if isinstance(user_data, dict) else None
-                if login != author:
-                    continue
+        while len(accumulated_comments) < limit and pages_fetched < max_fetch_pages:
+            try:
+                comments, page_next_cursor = await fetch_pr_comments_page(
+                    owner=request_owner or "",
+                    repo=request_repo or "",
+                    pull_number=pull_number or 0,
+                    host=request_host or "github.com",
+                    limit=limit,
+                    cursor=current_cursor,
+                )
+            except ToolExecutionError:
+                raise
+            except (ValueError, RuntimeError) as exc:
+                raise ToolExecutionError(
+                    code="internal_error",
+                    message="Unexpected failure while listing review comments.",
+                    next_steps=[
+                        "Retry the request.",
+                        "Check server logs if the error persists.",
+                    ],
+                ) from exc
 
-            if path_prefix:
-                path = str(comment.get("path", ""))
-                if not path.startswith(path_prefix):
-                    continue
+            pages_fetched += 1
+            next_cursor = page_next_cursor
 
-            filtered_comments.append(comment)
+            for comment in comments:
+                if _matches_filters(comment):
+                    accumulated_comments.append(comment)
+                    if len(accumulated_comments) >= limit:
+                        break
+
+            if len(accumulated_comments) >= limit:
+                break
+            if not page_next_cursor:
+                break
+
+            current_cursor = page_next_cursor
 
         structured_items = [
-            ReviewCommentModel.model_validate(comment) for comment in filtered_comments
+            ReviewCommentModel.model_validate(comment)
+            for comment in accumulated_comments[:limit]
         ]
+        # `total` is exact only once pagination is exhausted for this query.
+        total: int | None = len(structured_items) if next_cursor is None else None
         return PaginatedReviewCommentsResult(
             items=structured_items,
             next_cursor=next_cursor,
-            total=len(structured_items),
+            total=total,
         )
 
     async def run(self) -> None:

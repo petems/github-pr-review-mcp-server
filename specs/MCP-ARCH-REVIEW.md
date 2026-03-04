@@ -152,18 +152,25 @@ Confirm all tools have explicit annotation values and that they match real behav
 
 ### 4.2 Module Boundary Audit
 
-Confirm implementation structure aligns with:
+Confirm implementation structure aligns with the current flat package layout in
+`src/mcp_github_pr_review/`:
 
-- `client/` for auth + request wrapper
-- `tools/` for handlers
-- `schemas/` for input/output models
-- `errors/` for normalized errors
-- `pagination/` helpers
-- `types/` shared typed structures
+- `server.py` for MCP tool registration and orchestration
+- `models.py` for validated input/output schemas
+- `errors.py` for normalized tool error envelopes
+- `pagination.py` for cursor encode/decode helpers
+- `git_pr_resolver.py` for repository/PR detection and URL resolution
+
+If the codebase is later refactored into `client/`, `tools/`, `schemas/`,
+`errors/`, `pagination/`, and `types/`, use this verification plan to enforce
+behavioral parity with the current modules.
 
 Expected:
-- No duplicate HTTP request logic across modules.
-- Runtime config validated once at startup.
+- Runtime config validation happens once at startup/bootstrap in
+  `server.py` before tool execution paths fan out.
+- HTTP request/retry behavior is centralized (for example via
+  `_retry_http_request` + `RateLimitHandler`) with no duplicated ad-hoc
+  request wrappers in multiple modules.
 
 ## Phase 5: Automated Test Verification
 
