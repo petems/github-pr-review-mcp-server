@@ -21,6 +21,10 @@ from mcp import server
 from mcp.server.lowlevel.server import NotificationOptions
 from mcp.server.models import InitializationOptions
 from mcp.types import (
+    GetPromptResult,
+    Prompt,
+    PromptArgument,
+    PromptMessage,
     TextContent,
     Tool,
 )
@@ -40,6 +44,7 @@ from .github_api_constants import (
 from .models import (
     FetchPRReviewCommentsArgs,
     ResolveOpenPrUrlArgs,
+    ResolvePRReviewThreadArgs,
     ReviewCommentModel,
 )
 
@@ -536,6 +541,7 @@ async def fetch_pr_comments_graphql(
               endCursor
             }
             nodes {
+              id
               isResolved
               isOutdated
               resolvedBy {
@@ -643,6 +649,7 @@ async def fetch_pr_comments_graphql(
                     if len(all_comments) >= max_comments_v:
                         limit_reached = True
                         break
+                    thread_id = thread.get("id")
                     is_resolved = thread.get("isResolved", False)
                     is_outdated = thread.get("isOutdated", False)
                     resolved_by_data = thread.get("resolvedBy")
@@ -655,6 +662,7 @@ async def fetch_pr_comments_graphql(
                         # Build a complete node dict with thread-level metadata
                         node = {
                             **comment,
+                            "threadId": thread_id,
                             "isResolved": is_resolved,
                             "isOutdated": is_outdated,
                             "resolvedBy": resolved_by_data,
@@ -944,6 +952,118 @@ async def fetch_pr_comments(
         raise
 
 
+async def resolve_pr_review_thread(
+    thread_id: str,
+    *,
+    host: str = "github.com",
+    max_retries: int | None = None,
+) -> dict[str, Any]:
+    """Resolve a GitHub PR review thread via GraphQL.
+
+    Args:
+        thread_id: GraphQL review thread node ID.
+        host: GitHub host to target (e.g., github.com or GHES host).
+        max_retries: Optional transient retry override.
+
+    Returns:
+        Dictionary with resolved thread details.
+
+    Raises:
+        ValueError: Missing/invalid auth or GraphQL-level errors.
+        RuntimeError: Missing expected response shape.
+        httpx.RequestError/httpx.HTTPStatusError: Network/HTTP failures.
+    """
+    print(f"Resolving review thread {thread_id} on host {host}", file=sys.stderr)
+
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        raise ValueError("GITHUB_TOKEN is required to resolve review threads")
+
+    headers: dict[str, str] = {
+        "Authorization": f"Bearer {token}",
+        "Accept": GITHUB_ACCEPT_HEADER,
+        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        "Content-Type": "application/json",
+        "User-Agent": GITHUB_USER_AGENT,
+    }
+
+    max_retries_v = _int_conf("HTTP_MAX_RETRIES", 3, 0, 10, max_retries)
+
+    mutation = """
+    mutation($threadId: ID!) {
+      resolveReviewThread(input: {threadId: $threadId}) {
+        thread {
+          id
+          isResolved
+          resolvedBy {
+            login
+          }
+        }
+      }
+    }
+    """
+    variables = {"threadId": thread_id}
+
+    total_timeout = _float_conf("HTTP_TIMEOUT", 30.0, TIMEOUT_MIN, TIMEOUT_MAX)
+    connect_timeout = _float_conf(
+        "HTTP_CONNECT_TIMEOUT", 10.0, CONNECT_TIMEOUT_MIN, CONNECT_TIMEOUT_MAX
+    )
+
+    timeout = httpx.Timeout(timeout=total_timeout, connect=connect_timeout)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        rate_limit_handler = RateLimitHandler("resolve_pr_review_thread")
+        graphql_url = graphql_url_for_host(host)
+
+        async def make_graphql_request(
+            url: str = graphql_url, gql_vars: dict[str, Any] = variables
+        ) -> httpx.Response:
+            return await client.post(
+                url,
+                headers=headers,
+                json={"query": mutation, "variables": gql_vars},
+            )
+
+        async def handle_graphql_status(
+            resp: httpx.Response, _attempt: int
+        ) -> str | None:
+            return await rate_limit_handler.handle_rate_limit(resp)
+
+        try:
+            response = await _retry_http_request(
+                make_graphql_request,
+                max_retries_v,
+                status_handler=handle_graphql_status,
+            )
+        except SecondaryRateLimitError as exc:
+            raise RuntimeError(
+                "GitHub secondary rate limit while resolving review thread"
+            ) from exc
+
+        payload = response.json()
+        if "errors" in payload:
+            first_error = payload["errors"][0] if payload["errors"] else {}
+            error_message = first_error.get("message", "Unknown GraphQL error")
+            raise ValueError(
+                f"GitHub GraphQL error resolving review thread: {error_message}"
+            )
+
+        thread = payload.get("data", {}).get("resolveReviewThread", {}).get("thread")
+        if not isinstance(thread, dict):
+            raise RuntimeError("Missing resolveReviewThread.thread in GraphQL response")
+
+        resolved_by_data = thread.get("resolvedBy")
+        resolved_by = (
+            resolved_by_data.get("login")
+            if isinstance(resolved_by_data, dict)
+            else None
+        )
+        return {
+            "thread_id": thread.get("id", thread_id),
+            "is_resolved": bool(thread.get("isResolved", False)),
+            "resolved_by": resolved_by,
+        }
+
+
 def generate_markdown(comments: Sequence[CommentResult]) -> str:
     """Generates a markdown string from a list of review comments."""
 
@@ -984,6 +1104,10 @@ def generate_markdown(comments: Sequence[CommentResult]) -> str:
         # Line number is typically safe but escape for consistency
         line_num = escape_html_safe(comment.get("line", "N/A"))
         markdown += f"**Line:** {line_num}\n"
+
+        thread_id = comment.get("thread_id")
+        if thread_id:
+            markdown += f"**Thread ID:** `{escape_html_safe(thread_id)}`\n"
 
         # Add status indicators if available
         status_parts = []
@@ -1041,6 +1165,92 @@ class PRReviewServer:
         # in "Method not found" errors from clients.
         self.server.list_tools()(self.handle_list_tools)  # type: ignore[no-untyped-call]
         self.server.call_tool()(self.handle_call_tool)
+        self.server.list_prompts()(self.handle_list_prompts)  # type: ignore[no-untyped-call]
+        self.server.get_prompt()(self.handle_get_prompt)  # type: ignore[no-untyped-call]
+
+    async def handle_list_prompts(self) -> list[Prompt]:
+        """List available prompts for agent workflows."""
+        return [
+            Prompt(
+                name="resolve_pr_comment_after_fix",
+                description=(
+                    "Trigger this when an agent has implemented feedback and the PR "
+                    "review thread should be marked resolved."
+                ),
+                arguments=[
+                    PromptArgument(
+                        name="thread_id",
+                        description=(
+                            "GraphQL review thread ID to resolve (available in "
+                            "fetch_pr_review_comments output as thread_id)."
+                        ),
+                        required=True,
+                    ),
+                    PromptArgument(
+                        name="host",
+                        description=(
+                            "Optional GitHub host override (for example github.com or "
+                            "an enterprise hostname)."
+                        ),
+                        required=False,
+                    ),
+                    PromptArgument(
+                        name="summary",
+                        description=(
+                            "Optional one-line summary of what was fixed before "
+                            "resolving the thread."
+                        ),
+                        required=False,
+                    ),
+                ],
+            )
+        ]
+
+    async def handle_get_prompt(
+        self, name: str, arguments: dict[str, str] | None
+    ) -> GetPromptResult:
+        """Return prompt content by name."""
+        if name != "resolve_pr_comment_after_fix":
+            raise ValueError(f"Unknown prompt: {name}")
+
+        prompt_args = arguments or {}
+        thread_id = prompt_args.get("thread_id", "").strip()
+        host = prompt_args.get("host", "").strip()
+        summary = prompt_args.get("summary", "").strip()
+
+        lines = [
+            "The implementation work is complete and this PR feedback is resolved."
+        ]
+        if summary:
+            lines.append(f"Fix summary: {summary}")
+
+        if thread_id:
+            tool_call = f'Use `resolve_pr_review_thread` with `thread_id="{thread_id}"`'
+            if host:
+                tool_call += f' and `host="{host}"`.'
+            else:
+                tool_call += "."
+            lines.append(tool_call)
+        else:
+            lines.append(
+                "First call `fetch_pr_review_comments`, capture the relevant "
+                "`thread_id`, then call `resolve_pr_review_thread`."
+            )
+
+        lines.append(
+            "Only resolve the thread after verifying the requested changes "
+            "are actually complete."
+        )
+
+        return GetPromptResult(
+            description="Resolve a PR review thread after a fix is complete.",
+            messages=[
+                PromptMessage(
+                    role="user",
+                    content=TextContent(type="text", text="\n".join(lines)),
+                )
+            ],
+        )
 
     async def handle_list_tools(self) -> list[Tool]:
         """
@@ -1172,6 +1382,43 @@ class PRReviewServer:
                     },
                 },
             ),
+            Tool(
+                name="resolve_pr_review_thread",
+                description=(
+                    "Resolves a GitHub pull request review thread when an issue has "
+                    "been fixed. Requires a GraphQL review thread ID (thread_id), "
+                    "which is available from fetch_pr_review_comments output."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "thread_id": {
+                            "type": "string",
+                            "description": (
+                                "GraphQL review thread ID to resolve "
+                                "(for example PRT_kwDO... )."
+                            ),
+                        },
+                        "host": {
+                            "type": "string",
+                            "description": (
+                                "GitHub host override (e.g., 'github.com' or "
+                                "'github.enterprise.com'). If omitted, "
+                                "detected from git context or defaults to github.com."
+                            ),
+                        },
+                        "max_retries": {
+                            "type": "integer",
+                            "description": (
+                                "Max retries for transient errors (server-capped)."
+                            ),
+                            "minimum": 0,
+                            "maximum": 10,
+                        },
+                    },
+                    "required": ["thread_id"],
+                },
+            ),
         ]
 
     async def handle_call_tool(
@@ -1182,12 +1429,14 @@ class PRReviewServer:
 
         Parameters:
             name (str): The tool identifier to invoke (e.g.,
-                "fetch_pr_review_comments", "resolve_open_pr_url").
+                "fetch_pr_review_comments", "resolve_open_pr_url",
+                "resolve_pr_review_thread").
             arguments (dict[str, Any]): Tool-specific arguments; expected keys
                 depend on `name` (for example, "pr_url", "per_page",
                 "max_pages", "max_comments", "max_retries",
                 "select_strategy", "owner", "repo", "branch", and "output" for
-                "fetch_pr_review_comments").
+                "fetch_pr_review_comments"; "thread_id", "host", "max_retries"
+                for "resolve_pr_review_thread").
 
         Returns:
             Sequence[TextContent]: One or more text outputs produced by the
@@ -1368,6 +1617,49 @@ class PRReviewServer:
                 )
             )
             return [TextContent(type="text", text=resolved_url)]
+
+        if name == "resolve_pr_review_thread":
+            try:
+                validated_args_thread = ResolvePRReviewThreadArgs.model_validate(
+                    arguments
+                )
+            except ValidationError as e:
+                errors = e.errors()
+                if errors:
+                    first_error = errors[0]
+                    field = first_error["loc"][0] if first_error["loc"] else "unknown"
+                    msg = first_error["msg"]
+                    error_type = first_error["type"]
+                    if "int_parsing" in error_type or "int_type" in error_type:
+                        raise ValueError(
+                            f"Invalid type for {field}: expected integer"
+                        ) from None
+                    if (
+                        "greater_than_equal" in error_type
+                        or "less_than_equal" in error_type
+                    ):
+                        raise ValueError(
+                            f"Invalid value for {field}: must be between 0 and 10"
+                        ) from None
+                    raise ValueError(f"Invalid value for {field}: {msg}") from None
+                raise ValueError("Invalid arguments") from None
+
+            args_dict_thread = validated_args_thread.model_dump(exclude_none=True)
+            host = args_dict_thread.get("host")
+            if not host:
+                try:
+                    host = git_detect_repo_branch().host
+                except (OSError, RuntimeError, ValueError):
+                    host = os.getenv("GH_HOST", "github.com")
+
+            resolution_result = await _run_with_handling(
+                lambda: resolve_pr_review_thread(
+                    thread_id=args_dict_thread["thread_id"],
+                    host=host or "github.com",
+                    max_retries=args_dict_thread.get("max_retries"),
+                )
+            )
+            return [TextContent(type="text", text=json.dumps(resolution_result))]
 
         raise ValueError(f"Unknown tool: {name}")
 

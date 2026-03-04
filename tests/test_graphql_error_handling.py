@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from mcp_github_pr_review.server import fetch_pr_comments_graphql
+from mcp_github_pr_review.server import (
+    fetch_pr_comments_graphql,
+    resolve_pr_review_thread,
+)
 
 
 @pytest.mark.asyncio
@@ -1209,3 +1212,62 @@ async def test_graphql_empty_threads_do_not_affect_limit(
         assert result[59]["body"] == "Comment 60"
         assert result[60]["body"] == "Comment 61"
         assert result[109]["body"] == "Comment 110"
+
+
+@pytest.mark.asyncio
+async def test_resolve_pr_review_thread_success(
+    monkeypatch: pytest.MonkeyPatch, github_token: str
+) -> None:
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "data": {
+            "resolveReviewThread": {
+                "thread": {
+                    "id": "PRRT_abc123",
+                    "isResolved": True,
+                    "resolvedBy": {"login": "maintainer"},
+                }
+            }
+        }
+    }
+    mock_response.raise_for_status = MagicMock()
+
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.post.return_value = mock_response
+        mock_client_class.return_value = mock_client
+
+        result = await resolve_pr_review_thread("PRRT_abc123")
+
+        assert result["thread_id"] == "PRRT_abc123"
+        assert result["is_resolved"] is True
+        assert result["resolved_by"] == "maintainer"
+        assert mock_client.post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_pr_review_thread_graphql_error(
+    monkeypatch: pytest.MonkeyPatch, github_token: str
+) -> None:
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "errors": [{"message": "Thread not found"}],
+    }
+    mock_response.raise_for_status = MagicMock()
+
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.post.return_value = mock_response
+        mock_client_class.return_value = mock_client
+
+        with pytest.raises(
+            ValueError,
+            match="GitHub GraphQL error resolving review thread: Thread not found",
+        ):
+            await resolve_pr_review_thread("PRRT_missing")

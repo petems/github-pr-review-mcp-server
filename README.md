@@ -232,6 +232,7 @@ Fetches all review comments from a given GitHub pull request URL. The tool retur
     -   When `output="markdown"` (default): a single text item containing Markdown.
     -   When `output="json"`: a single text item containing a JSON string with the raw comments list.
     -   When `output="both"`: two text items in order — first JSON, then Markdown.
+    -   GraphQL results include `thread_id` so resolved comments can be closed later with `resolve_pr_review_thread`.
 
 Example (Markdown default):
 ```json
@@ -260,6 +261,17 @@ Resolves the open PR URL for the current branch using git detection.
     -   `branch` (str, optional): Override branch name for PR resolution.
 -   **Returns:**
     -   The resolved PR URL as a string.
+
+### 3. `resolve_pr_review_thread(thread_id: str, host?: str, max_retries?: int) -> json`
+
+Resolves a GitHub review thread when an issue has been fixed by an agent.
+
+-   **Parameters:**
+    -   `thread_id` (str, required): GraphQL review thread ID (available in `fetch_pr_review_comments` output).
+    -   `host` (str, optional): Override GitHub host for enterprise instances.
+    -   `max_retries` (int, optional): Retry budget for transient network/API failures.
+-   **Returns:**
+    -   A JSON object containing `thread_id`, `is_resolved`, and `resolved_by` when available.
 
 ### GitHub Token Scopes
 

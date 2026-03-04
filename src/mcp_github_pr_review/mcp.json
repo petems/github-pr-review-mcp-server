@@ -24,6 +24,6 @@
   "capabilities": {
     "tools": true,
     "resources": false,
-    "prompts": false
+    "prompts": true
   }
 }
