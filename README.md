@@ -262,7 +262,7 @@ Resolves the open PR URL for the current branch using git detection.
 -   **Returns:**
     -   The resolved PR URL as a string.
 
-### 3. `resolve_pr_review_thread(thread_id: str, host?: str, max_retries?: int) -> json`
+### 3. `resolve_pr_review_thread(thread_id: str, host?: str, max_retries?: int) -> str`
 
 Resolves a GitHub review thread when an issue has been fixed by an agent.
 
