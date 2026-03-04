@@ -79,6 +79,6 @@ async def test_comment_count_limit_stops_early(mock_http_client) -> None:
     assert isinstance(comments, list)
     # Page 1: 60, Page 2: 60 -> total 120 (>= 100), then stop
     assert len(comments) == 120, "Stops after exceeding max_comments"
-    assert (
-        len(mock_http_client.get_calls) == 2
-    ), "Should not fetch a third page once limit reached"
+    assert len(mock_http_client.get_calls) == 2, (
+        "Should not fetch a third page once limit reached"
+    )
