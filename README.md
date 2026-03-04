@@ -232,6 +232,7 @@ Fetches all review comments from a given GitHub pull request URL. The tool retur
     -   When `output="markdown"` (default): a single text item containing Markdown.
     -   When `output="json"`: a single text item containing a JSON string with the raw comments list.
     -   When `output="both"`: two text items in order — first JSON, then Markdown.
+    -   GraphQL results include `thread_id` so resolved comments can be closed later with `resolve_pr_review_thread`.
 
 Example (Markdown default):
 ```json
@@ -261,18 +262,36 @@ Resolves the open PR URL for the current branch using git detection.
 -   **Returns:**
     -   The resolved PR URL as a string.
 
+### 3. `resolve_pr_review_thread(thread_id: str, host?: str, max_retries?: int) -> str`
+
+Resolves a GitHub review thread when an issue has been fixed by an agent.
+
+-   **Parameters:**
+    -   `thread_id` (str, required): GraphQL review thread ID (available in `fetch_pr_review_comments` output).
+    -   `host` (str, optional): Override GitHub host for enterprise instances.
+    -   `max_retries` (int, optional): Retry budget for transient network/API failures.
+-   **Returns:**
+    -   A JSON-formatted string (text), produced via `json.dumps(...)`, not a native JSON object.
+    -   When parsed as JSON, the payload contains `thread_id`, `is_resolved`, and `resolved_by` when available.
+-   **Permissions:**
+    -   **Classic PAT:** `repo` scope (full repository access) is required.
+    -   **Fine-grained PAT:** Repository access to the target repo plus **Pull requests: Read and write**.
+
 ### GitHub Token Scopes
 
 Use least privilege for `GITHUB_TOKEN`:
 
+- Read-only tools (`fetch_pr_review_comments`, `resolve_open_pr_url`) can run with read-level pull request access.
 - Classic PATs:
-  - Public repositories: `public_repo` is sufficient.
-  - Private repositories: `repo` is required.
+  - Public repositories (read-only tools): `public_repo` is sufficient.
+  - Private repositories (read-only tools): `repo` is required.
+  - `resolve_pr_review_thread` (mutation): `repo` is required.
 - Fine-grained PATs:
   - Repository access: Select the target repo(s).
-  - Permissions: Pull requests → Read access (enables reading review comments at `GET /repos/{owner}/{repo}/pulls/{pull_number}/comments`).
+  - Read-only tools: Pull requests → Read access (enables reading review comments at `GET /repos/{owner}/{repo}/pulls/{pull_number}/comments`).
+  - `resolve_pr_review_thread`: Pull requests → Read and write.
 
-Avoid granting write or admin scopes unless needed for other tools.
+Avoid broader write/admin scopes unless needed by your workflow.
 
 ## Warning: Production Deployment
 

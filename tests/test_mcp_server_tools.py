@@ -39,6 +39,22 @@ def test_generate_markdown_skips_error_entries() -> None:
     assert "Review Comment by dev" in result
 
 
+def test_generate_markdown_includes_thread_id_when_available() -> None:
+    result = generate_markdown(
+        [
+            {
+                "user": {"login": "dev"},
+                "path": "file.py",
+                "line": 1,
+                "thread_id": "PRRT_thread123",
+                "body": "Looks good",
+                "diff_hunk": "@@\n+code\n",
+            }
+        ]
+    )
+    assert "**Thread ID:** `PRRT_thread123`" in result
+
+
 @pytest.mark.asyncio
 async def test_handle_list_tools(mcp_server: PRReviewServer) -> None:
     tools = await mcp_server.handle_list_tools()
@@ -46,6 +62,7 @@ async def test_handle_list_tools(mcp_server: PRReviewServer) -> None:
     assert {
         "fetch_pr_review_comments",
         "resolve_open_pr_url",
+        "resolve_pr_review_thread",
     } <= names
 
 
@@ -492,6 +509,80 @@ async def test_handle_call_tool_resolve_pr(
 
 
 @pytest.mark.asyncio
+async def test_handle_call_tool_resolve_pr_review_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_server: PRReviewServer,
+) -> None:
+    resolve_thread_mock = AsyncMock(
+        return_value={
+            "thread_id": "PRRT_test123",
+            "is_resolved": True,
+            "resolved_by": "maintainer",
+        }
+    )
+    monkeypatch.setattr(
+        "mcp_github_pr_review.server.resolve_pr_review_thread", resolve_thread_mock
+    )
+
+    result = await mcp_server.handle_call_tool(
+        "resolve_pr_review_thread",
+        {"thread_id": "PRRT_test123", "host": "github.com", "max_retries": 2},
+    )
+
+    assert resolve_thread_mock.await_count == 1
+    await_kwargs = resolve_thread_mock.await_args.kwargs
+    assert await_kwargs["thread_id"] == "PRRT_test123"
+    assert await_kwargs["host"] == "github.com"
+    assert await_kwargs["max_retries"] == 2
+    assert json.loads(result[0].text)["is_resolved"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_call_tool_resolve_pr_review_thread_uses_git_context_host(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_server: PRReviewServer,
+) -> None:
+    context = SimpleNamespace(
+        host="enterprise.example.com",
+        owner="ctx-owner",
+        repo="ctx-repo",
+        branch="ctx-branch",
+    )
+    monkeypatch.setattr(
+        "mcp_github_pr_review.server.git_detect_repo_branch", lambda: context
+    )
+    resolve_thread_mock = AsyncMock(
+        return_value={
+            "thread_id": "PRRT_ctx123",
+            "is_resolved": True,
+            "resolved_by": "maintainer",
+        }
+    )
+    monkeypatch.setattr(
+        "mcp_github_pr_review.server.resolve_pr_review_thread", resolve_thread_mock
+    )
+
+    await mcp_server.handle_call_tool(
+        "resolve_pr_review_thread",
+        {"thread_id": "PRRT_ctx123"},
+    )
+
+    await_kwargs = resolve_thread_mock.await_args.kwargs
+    assert await_kwargs["host"] == "enterprise.example.com"
+
+
+@pytest.mark.asyncio
+async def test_handle_call_tool_resolve_pr_review_thread_invalid_max_retries(
+    mcp_server: PRReviewServer,
+) -> None:
+    with pytest.raises(ValueError, match="must be between 0 and 10"):
+        await mcp_server.handle_call_tool(
+            "resolve_pr_review_thread",
+            {"thread_id": "PRRT_test123", "max_retries": 11},
+        )
+
+
+@pytest.mark.asyncio
 async def test_handle_call_tool_resolve_pr_uses_git_context(
     monkeypatch: pytest.MonkeyPatch,
     mcp_server: PRReviewServer,
@@ -896,6 +987,34 @@ async def test_review_server_run(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_list_prompts(mcp_server: PRReviewServer) -> None:
+    prompts = await mcp_server.handle_list_prompts()
+    names = {prompt.name for prompt in prompts}
+    assert "resolve_pr_comment_after_fix" in names
+
+
+@pytest.mark.asyncio
+async def test_handle_get_prompt_for_resolved_issue(mcp_server: PRReviewServer) -> None:
+    prompt = await mcp_server.handle_get_prompt(
+        "resolve_pr_comment_after_fix",
+        {
+            "thread_id": "PRRT_123",
+            "host": "github.com",
+            "summary": "Addressed edge-case handling",
+        },
+    )
+    assert "resolve_pr_review_thread" in prompt.messages[0].content.text
+    assert "PRRT_123" in prompt.messages[0].content.text
+    assert "Addressed edge-case handling" in prompt.messages[0].content.text
+
+
+@pytest.mark.asyncio
+async def test_handle_get_prompt_unknown_name(mcp_server: PRReviewServer) -> None:
+    with pytest.raises(ValueError, match="Unknown prompt"):
+        await mcp_server.handle_get_prompt("unknown_prompt", {})
+
+
+@pytest.mark.asyncio
 async def test_resolve_open_pr_url_tool_schema_includes_host(
     mcp_server: PRReviewServer,
 ) -> None:
@@ -1043,3 +1162,17 @@ async def test_handle_call_tool_resolve_pr_explicit_host_overrides_git_context(
     await_kwargs = resolve_mock.await_args.kwargs
     assert await_kwargs["host"] == "override-host.com"
     assert result[0].text == "https://override-host.com/git-owner/git-repo/pull/55"
+
+
+@pytest.mark.asyncio
+async def test_resolve_pr_review_thread_tool_schema(
+    mcp_server: PRReviewServer,
+) -> None:
+    tools = await mcp_server.handle_list_tools()
+    resolve_tool = next(t for t in tools if t.name == "resolve_pr_review_thread")
+
+    properties = resolve_tool.inputSchema["properties"]
+    assert "thread_id" in properties
+    assert properties["thread_id"]["type"] == "string"
+    assert "max_retries" in properties
+    assert resolve_tool.inputSchema["required"] == ["thread_id"]

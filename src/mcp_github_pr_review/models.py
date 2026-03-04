@@ -96,6 +96,7 @@ class ReviewCommentModel(BaseModel):
         line: Line number (0 for file-level comments)
         body: Comment text
         diff_hunk: Diff context
+        thread_id: GraphQL review thread ID (required to resolve thread)
         is_resolved: Whether comment is resolved
         is_outdated: Whether comment is outdated
         resolved_by: Username of resolver, if resolved
@@ -112,6 +113,7 @@ class ReviewCommentModel(BaseModel):
     line: int = Field(default=0, ge=0)
     body: str = Field(default="")
     diff_hunk: str = Field(default="")
+    thread_id: str | None = None
     is_resolved: bool = False
     is_outdated: bool = False
     resolved_by: str | None = None
@@ -153,6 +155,7 @@ class ReviewCommentModel(BaseModel):
             line=data.get("line") or 0,
             body=body,
             diff_hunk=data.get("diff_hunk", ""),
+            thread_id=data.get("thread_id"),
             is_resolved=data.get("is_resolved", False),
             is_outdated=data.get("is_outdated", False),
             resolved_by=data.get("resolved_by"),
@@ -183,6 +186,7 @@ class ReviewCommentModel(BaseModel):
             line=node.get("line") or 0,
             body=node.get("body", ""),
             diff_hunk=node.get("diffHunk", ""),
+            thread_id=node.get("threadId"),
             is_resolved=node.get("isResolved", False),
             is_outdated=node.get("isOutdated", False),
             resolved_by=resolved_by,
@@ -243,3 +247,36 @@ class ResolveOpenPrUrlArgs(BaseModel):
     repo: str | None = None
     branch: str | None = None
     select_strategy: Literal["branch", "latest", "first", "error"] = "branch"
+
+
+class ResolvePRReviewThreadArgs(BaseModel):
+    """Arguments for the resolve_pr_review_thread MCP tool."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        validate_assignment=True,
+    )
+
+    thread_id: str = Field(min_length=1)
+    host: str | None = None
+    max_retries: int | None = Field(default=None, ge=0, le=10)
+
+    @field_validator("max_retries", mode="before")
+    @classmethod
+    def _reject_bool_and_float(cls, v: Any) -> Any:
+        """Reject boolean and float values for numeric fields."""
+        if v is None:
+            return v
+        if isinstance(v, bool):
+            raise ValueError("Invalid type: expected integer")
+        if isinstance(v, float):
+            raise ValueError("Invalid type: expected integer")
+        return v
+
+    @field_validator("thread_id")
+    @classmethod
+    def _strip_thread_id(cls, v: str) -> str:
+        thread_id = v.strip()
+        if not thread_id:
+            raise ValueError("thread_id must not be empty")
+        return thread_id

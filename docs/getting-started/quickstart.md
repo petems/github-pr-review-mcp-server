@@ -35,7 +35,7 @@ Use the built-in health command to ensure connectivity:
 claude mcp call pr-review list-tools
 ```
 
-Expected response includes `fetch_pr_review_comments` and `resolve_open_pr_url`.
+Expected response includes `fetch_pr_review_comments`, `resolve_open_pr_url`, and `resolve_pr_review_thread`.
 
 ## Next Steps
 
