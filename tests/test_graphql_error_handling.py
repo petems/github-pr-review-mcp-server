@@ -1271,3 +1271,72 @@ async def test_resolve_pr_review_thread_graphql_error(
             match="GitHub GraphQL error resolving review thread: Thread not found",
         ):
             await resolve_pr_review_thread("PRRT_missing")
+
+
+@pytest.mark.asyncio
+async def test_resolve_pr_review_thread_rejects_non_dict_payload(
+    monkeypatch: pytest.MonkeyPatch, github_token: str
+) -> None:
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = ["not", "a", "dict"]
+    mock_response.raise_for_status = MagicMock()
+
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.post.return_value = mock_response
+        mock_client_class.return_value = mock_client
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                "Invalid GraphQL response format while resolving review thread: "
+                "expected top-level JSON object"
+            ),
+        ):
+            await resolve_pr_review_thread("PRRT_bad_payload")
+
+
+@pytest.mark.asyncio
+async def test_resolve_pr_review_thread_normalizes_host(
+    monkeypatch: pytest.MonkeyPatch, github_token: str
+) -> None:
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "data": {
+            "resolveReviewThread": {
+                "thread": {
+                    "id": "PRRT_host123",
+                    "isResolved": True,
+                    "resolvedBy": {"login": "maintainer"},
+                }
+            }
+        }
+    }
+    mock_response.raise_for_status = MagicMock()
+
+    captured_host: dict[str, str] = {}
+
+    def mock_graphql_url_for_host(host: str) -> str:
+        captured_host["value"] = host
+        return "https://example.com/api/graphql"
+
+    monkeypatch.setenv("GH_HOST", "  Enterprise.Example.com  ")
+    monkeypatch.setattr(
+        "mcp_github_pr_review.server.graphql_url_for_host",
+        mock_graphql_url_for_host,
+    )
+
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.post.return_value = mock_response
+        mock_client_class.return_value = mock_client
+
+        await resolve_pr_review_thread("PRRT_host123", host="   ")
+
+    assert captured_host["value"] == "enterprise.example.com"

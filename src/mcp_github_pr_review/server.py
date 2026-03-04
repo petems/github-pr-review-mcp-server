@@ -973,7 +973,16 @@ async def resolve_pr_review_thread(
         RuntimeError: Missing expected response shape.
         httpx.RequestError/httpx.HTTPStatusError: Network/HTTP failures.
     """
-    print(f"Resolving review thread {thread_id} on host {host}", file=sys.stderr)
+    normalized_host = host.strip().lower()
+    if not normalized_host:
+        normalized_host = os.getenv("GH_HOST", "github.com").strip().lower()
+    if not normalized_host:
+        normalized_host = "github.com"
+
+    print(
+        f"Resolving review thread {thread_id} on host {normalized_host}",
+        file=sys.stderr,
+    )
 
     token = os.getenv("GITHUB_TOKEN")
     if not token:
@@ -1012,7 +1021,7 @@ async def resolve_pr_review_thread(
     timeout = httpx.Timeout(timeout=total_timeout, connect=connect_timeout)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         rate_limit_handler = RateLimitHandler("resolve_pr_review_thread")
-        graphql_url = graphql_url_for_host(host)
+        graphql_url = graphql_url_for_host(normalized_host)
 
         async def make_graphql_request(
             url: str = graphql_url, gql_vars: dict[str, Any] = variables
@@ -1040,8 +1049,17 @@ async def resolve_pr_review_thread(
             ) from exc
 
         payload = response.json()
-        if "errors" in payload:
-            first_error = payload["errors"][0] if payload["errors"] else {}
+        if not isinstance(payload, dict):
+            raise ValueError(
+                "Invalid GraphQL response format while resolving review thread: "
+                "expected top-level JSON object"
+            )
+
+        errors = payload.get("errors")
+        if errors:
+            first_error = errors[0] if isinstance(errors, list) else {}
+            if not isinstance(first_error, dict):
+                first_error = {}
             error_message = first_error.get("message", "Unknown GraphQL error")
             raise ValueError(
                 f"GitHub GraphQL error resolving review thread: {error_message}"
