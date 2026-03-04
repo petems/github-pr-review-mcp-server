@@ -111,10 +111,18 @@ This project uses [pre-commit](https://pre-commit.com/) to run formatting, linti
 ```bash
 # Install the git hook scripts
 uv run --extra dev pre-commit install
+uv run --extra dev pre-commit install --hook-type commit-msg
 
 # Run all checks on every file
 uv run --extra dev pre-commit run --all-files
 ```
+
+If `pre-commit install` is blocked because you use a global `core.hooksPath` (for example, `/usr/local/dd/global_hooks`), install hooks directly into the repo hooks directory via pre-commit's install API instead. In this repo, that created:
+
+- `.git/hooks/pre-commit`
+- `.git/hooks/commit-msg`
+
+These are example paths relative to the repository root and should be adapted to your local environment. Both scripts should be executable. The global hook chain is expected to invoke these repo-level hooks.
 
 ## Running the MCP Server
 
