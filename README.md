@@ -119,10 +119,10 @@ uv run --extra dev pre-commit run --all-files
 
 If `pre-commit install` is blocked because you use a global `core.hooksPath` (for example, `/usr/local/dd/global_hooks`), install hooks directly into the repo hooks directory via pre-commit's install API instead. In this repo, that created:
 
-- `/Users/peter.souter/projects/github-pr-review-mcp-server/.git/hooks/pre-commit`
-- `/Users/peter.souter/projects/github-pr-review-mcp-server/.git/hooks/commit-msg`
+- `.git/hooks/pre-commit`
+- `.git/hooks/commit-msg`
 
-Both scripts should be executable. The global hook chain is expected to invoke these repo-level hooks.
+These are example paths relative to the repository root and should be adapted to your local environment. Both scripts should be executable. The global hook chain is expected to invoke these repo-level hooks.
 
 ## Running the MCP Server
 
