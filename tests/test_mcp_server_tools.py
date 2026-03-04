@@ -927,12 +927,12 @@ async def test_resolve_open_pr_url_tool_schema_has_parameter_descriptions(
     # Verify all parameters have descriptions
     for param_name in ["select_strategy", "owner", "repo", "branch", "host"]:
         assert param_name in properties, f"Parameter {param_name} missing from schema"
-        assert "description" in properties[param_name], (
-            f"Parameter {param_name} missing description"
-        )
-        assert properties[param_name]["description"], (
-            f"Parameter {param_name} has empty description"
-        )
+        assert (
+            "description" in properties[param_name]
+        ), f"Parameter {param_name} missing description"
+        assert properties[param_name][
+            "description"
+        ], f"Parameter {param_name} has empty description"
 
 
 @pytest.mark.asyncio

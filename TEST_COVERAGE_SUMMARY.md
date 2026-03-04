@@ -126,18 +126,18 @@ Added **9 comprehensive test functions** to `tests/test_graphql_error_handling.p
 - File size: 540 lines → 1157 lines
 
 ### Coverage Areas
-✅ **Happy Path**: Normal limit enforcement  
-✅ **Edge Cases**: Boundary conditions, exact limits  
-✅ **Loop Breaking**: Both outer (threads) and inner (comments) loops  
-✅ **Pagination**: Multi-page scenarios with limits  
-✅ **Diagnostic Output**: stderr message verification  
-✅ **Empty Data**: Empty threads handling  
-✅ **Flag Logic**: limit_reached flag behavior  
+✅ **Happy Path**: Normal limit enforcement
+✅ **Edge Cases**: Boundary conditions, exact limits
+✅ **Loop Breaking**: Both outer (threads) and inner (comments) loops
+✅ **Pagination**: Multi-page scenarios with limits
+✅ **Diagnostic Output**: stderr message verification
+✅ **Empty Data**: Empty threads handling
+✅ **Flag Logic**: limit_reached flag behavior
 
 ### Testing Framework & Patterns Used
 
-**Framework**: pytest with pytest-asyncio  
-**Mocking**: unittest.mock (AsyncMock, MagicMock, patch)  
+**Framework**: pytest with pytest-asyncio
+**Mocking**: unittest.mock (AsyncMock, MagicMock, patch)
 **Fixtures Used**:
 - `monkeypatch`: Environment variable configuration
 - `github_token`: Mock GitHub authentication

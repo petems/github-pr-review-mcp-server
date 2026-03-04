@@ -62,9 +62,9 @@ class TestModelValidationPerformance:
         elapsed = time.perf_counter() - start
 
         # Should complete within budget (relaxed on CI)
-        assert elapsed < budget(0.1), (
-            f"Validation took {elapsed * 1000:.2f}ms (expected <100ms)"
-        )
+        assert elapsed < budget(
+            0.1
+        ), f"Validation took {elapsed * 1000:.2f}ms (expected <100ms)"
 
     def test_validate_graphql_comments_performance(self) -> None:
         """Test GraphQL comment validation performance."""
@@ -91,9 +91,9 @@ class TestModelValidationPerformance:
         elapsed = time.perf_counter() - start
 
         # Should complete within budget (relaxed on CI)
-        assert elapsed < budget(0.1), (
-            f"Validation took {elapsed * 1000:.2f}ms (expected <100ms)"
-        )
+        assert elapsed < budget(
+            0.1
+        ), f"Validation took {elapsed * 1000:.2f}ms (expected <100ms)"
 
     def test_tool_args_validation_performance(self) -> None:
         """Test that tool argument validation is fast."""
@@ -117,9 +117,9 @@ class TestModelValidationPerformance:
         elapsed = time.perf_counter() - start
 
         # Should complete within budget (relaxed on CI)
-        assert elapsed < budget(0.1), (
-            f"Validation took {elapsed * 1000:.2f}ms (expected <100ms)"
-        )
+        assert elapsed < budget(
+            0.1
+        ), f"Validation took {elapsed * 1000:.2f}ms (expected <100ms)"
 
     def test_git_context_validation_performance(self) -> None:
         """Test git context model validation performance."""
@@ -144,9 +144,9 @@ class TestModelValidationPerformance:
         elapsed = time.perf_counter() - start
 
         # Should complete within budget (relaxed on CI)
-        assert elapsed < budget(0.05), (
-            f"Validation took {elapsed * 1000:.2f}ms (expected <50ms)"
-        )
+        assert elapsed < budget(
+            0.05
+        ), f"Validation took {elapsed * 1000:.2f}ms (expected <50ms)"
 
     def test_model_dump_performance(self) -> None:
         """Test that model_dump() is fast enough for typical use."""
@@ -173,9 +173,9 @@ class TestModelValidationPerformance:
         elapsed = time.perf_counter() - start
 
         # Should complete within budget (relaxed on CI)
-        assert elapsed < budget(0.1), (
-            f"model_dump took {elapsed * 1000:.2f}ms (expected <100ms)"
-        )
+        assert elapsed < budget(
+            0.1
+        ), f"model_dump took {elapsed * 1000:.2f}ms (expected <100ms)"
 
     def test_validation_overhead_vs_mock_api_call(self) -> None:
         """Test that validation overhead is <5% compared to typical API latency."""
@@ -208,9 +208,9 @@ class TestModelValidationPerformance:
         overhead_percentage = (validation_time / simulated_api_latency) * 100
 
         # Should be less than 5% of API latency (relaxed on CI)
-        assert overhead_percentage < (5.0 * RELAX_FACTOR), (
-            f"Validation overhead is {overhead_percentage:.2f}% (expected <5%)"
-        )
+        assert overhead_percentage < (
+            5.0 * RELAX_FACTOR
+        ), f"Validation overhead is {overhead_percentage:.2f}% (expected <5%)"
 
     def test_complex_comment_with_nested_data(self) -> None:
         """Test validation performance with complex nested data."""
@@ -239,9 +239,9 @@ class TestModelValidationPerformance:
         elapsed = time.perf_counter() - start
 
         # Should still complete in reasonable time (relaxed on CI)
-        assert elapsed < budget(0.05), (
-            f"Validation took {elapsed * 1000:.2f}ms (expected <50ms)"
-        )
+        assert elapsed < budget(
+            0.05
+        ), f"Validation took {elapsed * 1000:.2f}ms (expected <50ms)"
 
 
 class TestValidationErrorPerformance:
@@ -267,9 +267,9 @@ class TestValidationErrorPerformance:
 
         assert error_count == 1000, "All validations should have failed"
         # Error handling should be fast (relaxed on CI)
-        assert elapsed < budget(0.05), (
-            f"Error handling took {elapsed * 1000:.2f}ms (expected <50ms)"
-        )
+        assert elapsed < budget(
+            0.05
+        ), f"Error handling took {elapsed * 1000:.2f}ms (expected <50ms)"
 
     def test_boolean_rejection_performance(self) -> None:
         """Test performance of boolean rejection validator."""
@@ -289,6 +289,6 @@ class TestValidationErrorPerformance:
 
         assert error_count == 1000, "All validations should have failed"
         # Boolean rejection should be fast (relaxed on CI)
-        assert elapsed < budget(0.03), (
-            f"Boolean rejection took {elapsed * 1000:.2f}ms (expected <30ms)"
-        )
+        assert elapsed < budget(
+            0.03
+        ), f"Boolean rejection took {elapsed * 1000:.2f}ms (expected <30ms)"

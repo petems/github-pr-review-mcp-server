@@ -246,4 +246,3 @@
   - Exposing Pydantic models would create additional maintenance burden
   - MCP clients don't benefit from schema export currently
 - **Future Consideration**: Re-evaluate if MCP protocol adds schema negotiation capabilities
-

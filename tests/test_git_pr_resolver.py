@@ -143,9 +143,9 @@ def test_parse_remote_url_edge_cases() -> None:
 
     for url, expected in success_cases:
         result = parse_remote_url(url)
-        assert result == expected, (
-            f"Failed to parse {url} correctly: got {result}, expected {expected}"
-        )
+        assert (
+            result == expected
+        ), f"Failed to parse {url} correctly: got {result}, expected {expected}"
 
 
 def test_parse_remote_url_unsupported_formats() -> None:
@@ -619,9 +619,9 @@ def test_graphql_url_for_host_with_api_url_env(monkeypatch):
         monkeypatch.delenv("GITHUB_GRAPHQL_URL", raising=False)
 
         result = graphql_url_for_host("any-host")
-        assert result == expected_graphql, (
-            f"Expected {expected_graphql}, got {result} for API URL {api_url}"
-        )
+        assert (
+            result == expected_graphql
+        ), f"Expected {expected_graphql}, got {result} for API URL {api_url}"
 
 
 def test_graphql_url_for_host_with_explicit_graphql_url(monkeypatch):
