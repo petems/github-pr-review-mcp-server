@@ -271,7 +271,8 @@ Resolves a GitHub review thread when an issue has been fixed by an agent.
     -   `host` (str, optional): Override GitHub host for enterprise instances.
     -   `max_retries` (int, optional): Retry budget for transient network/API failures.
 -   **Returns:**
-    -   A JSON object containing `thread_id`, `is_resolved`, and `resolved_by` when available.
+    -   A JSON-formatted string (text), produced via `json.dumps(...)`, not a native JSON object.
+    -   When parsed as JSON, the payload contains `thread_id`, `is_resolved`, and `resolved_by` when available.
 
 ### GitHub Token Scopes
 

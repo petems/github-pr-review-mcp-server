@@ -6,7 +6,7 @@
   "args": [],
   "env": {
     "GITHUB_TOKEN": {
-      "description": "GitHub personal access token with pull-request read access (public_repo or repo scope).",
+      "description": "GitHub personal access token. With prompts/thread resolution enabled, resolve_pr_review_thread (GraphQL resolveReviewThread mutation) requires write-capable permissions and will fail with a read-only token. Required scopes: classic PAT repo (full access); fine-grained PAT Pull requests: Read & write.",
       "required": true
     },
     "GH_HOST": {

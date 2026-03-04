@@ -261,6 +261,18 @@ class ResolvePRReviewThreadArgs(BaseModel):
     host: str | None = None
     max_retries: int | None = Field(default=None, ge=0, le=10)
 
+    @field_validator("max_retries", mode="before")
+    @classmethod
+    def _reject_bool_and_float(cls, v: Any) -> Any:
+        """Reject boolean and float values for numeric fields."""
+        if v is None:
+            return v
+        if isinstance(v, bool):
+            raise ValueError("Invalid type: expected integer")
+        if isinstance(v, float):
+            raise ValueError("Invalid type: expected integer")
+        return v
+
     @field_validator("thread_id")
     @classmethod
     def _strip_thread_id(cls, v: str) -> str:

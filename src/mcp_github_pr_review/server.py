@@ -1047,7 +1047,15 @@ async def resolve_pr_review_thread(
                 f"GitHub GraphQL error resolving review thread: {error_message}"
             )
 
-        thread = payload.get("data", {}).get("resolveReviewThread", {}).get("thread")
+        data = payload.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
+
+        resolve_review_thread = data.get("resolveReviewThread") or {}
+        if not isinstance(resolve_review_thread, dict):
+            resolve_review_thread = {}
+
+        thread = resolve_review_thread.get("thread")
         if not isinstance(thread, dict):
             raise RuntimeError("Missing resolveReviewThread.thread in GraphQL response")
 
