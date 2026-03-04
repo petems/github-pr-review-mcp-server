@@ -973,6 +973,16 @@ async def resolve_pr_review_thread(
         RuntimeError: Missing expected response shape.
         httpx.RequestError/httpx.HTTPStatusError: Network/HTTP failures.
     """
+    if not isinstance(thread_id, str):
+        raise ValueError(
+            "Invalid thread_id: must be a non-empty, non-whitespace string"
+        )
+    normalized_thread_id = thread_id.strip()
+    if not normalized_thread_id:
+        raise ValueError(
+            "Invalid thread_id: must be a non-empty, non-whitespace string"
+        )
+
     normalized_host = host.strip().lower()
     if not normalized_host:
         normalized_host = os.getenv("GH_HOST", "github.com").strip().lower()
@@ -980,7 +990,7 @@ async def resolve_pr_review_thread(
         normalized_host = "github.com"
 
     print(
-        f"Resolving review thread {thread_id} on host {normalized_host}",
+        f"Resolving review thread {normalized_thread_id} on host {normalized_host}",
         file=sys.stderr,
     )
 
@@ -1011,7 +1021,7 @@ async def resolve_pr_review_thread(
       }
     }
     """
-    variables = {"threadId": thread_id}
+    variables = {"threadId": normalized_thread_id}
 
     total_timeout = _float_conf("HTTP_TIMEOUT", 30.0, TIMEOUT_MIN, TIMEOUT_MAX)
     connect_timeout = _float_conf(
@@ -1084,7 +1094,7 @@ async def resolve_pr_review_thread(
             else None
         )
         return {
-            "thread_id": thread.get("id", thread_id),
+            "thread_id": thread.get("id", normalized_thread_id),
             "is_resolved": bool(thread.get("isResolved", False)),
             "resolved_by": resolved_by,
         }

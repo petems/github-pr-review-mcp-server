@@ -1300,6 +1300,18 @@ async def test_resolve_pr_review_thread_rejects_non_dict_payload(
 
 
 @pytest.mark.asyncio
+async def test_resolve_pr_review_thread_rejects_empty_thread_id() -> None:
+    with patch("httpx.AsyncClient") as mock_client_class:
+        with pytest.raises(
+            ValueError,
+            match="Invalid thread_id: must be a non-empty, non-whitespace string",
+        ):
+            await resolve_pr_review_thread("   ")
+
+    mock_client_class.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_resolve_pr_review_thread_normalizes_host(
     monkeypatch: pytest.MonkeyPatch, github_token: str
 ) -> None:
