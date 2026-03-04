@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 
 class GitHubUserModel(BaseModel):
@@ -243,3 +243,97 @@ class ResolveOpenPrUrlArgs(BaseModel):
     repo: str | None = None
     branch: str | None = None
     select_strategy: Literal["branch", "latest", "first", "error"] = "branch"
+
+
+class GithubListPrReviewCommentsArgs(BaseModel):
+    """Arguments for the github_list_pr_review_comments MCP tool."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        validate_assignment=True,
+    )
+
+    pr_url: str | None = None
+    owner: str | None = None
+    repo: str | None = None
+    branch: str | None = None
+    host: str | None = None
+    select_strategy: Literal["branch", "latest", "first", "error"] = "branch"
+    limit: StrictInt = Field(default=50, ge=1, le=100)
+    cursor: str | None = None
+    author: str | None = None
+    path_prefix: str | None = None
+    include_resolved: bool | None = None
+
+    @field_validator("author", "path_prefix", mode="before")
+    @classmethod
+    def strip_optional_text(cls, v: Any) -> Any:
+        """Normalize optional text filters and reject empty strings."""
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            return v
+        value = v.strip()
+        return value or None
+
+
+class GithubResolveOpenPrUrlResult(BaseModel):
+    """Structured result for github_resolve_open_pr_url."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        validate_assignment=True,
+    )
+
+    url: str = Field(min_length=1)
+
+
+class PaginatedReviewCommentsResult(BaseModel):
+    """Structured paginated list response for review comments."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        validate_assignment=True,
+        populate_by_name=True,
+    )
+
+    items: list[ReviewCommentModel] = Field(default_factory=list)
+    next_cursor: str | None = Field(
+        default=None,
+        alias="nextCursor",
+    )
+    total: int | None = Field(default=None, ge=0)
+
+
+ToolErrorCode = Literal[
+    "invalid_arguments",
+    "auth",
+    "not_found",
+    "rate_limited",
+    "upstream",
+    "internal_error",
+]
+
+
+class ToolErrorDetailsModel(BaseModel):
+    """Normalized, actionable tool error details."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        validate_assignment=True,
+    )
+
+    code: ToolErrorCode
+    message: str = Field(min_length=1)
+    next_steps: list[str] = Field(default_factory=list)
+
+
+class ToolErrorEnvelopeModel(BaseModel):
+    """Error envelope shape used by canonical MCP tools."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        validate_assignment=True,
+    )
+
+    error: ToolErrorDetailsModel
