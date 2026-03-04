@@ -12,6 +12,7 @@ from mcp_github_pr_review.server import (
     PRReviewServer,
     fetch_pr_comments,
     generate_markdown,
+    generate_non_inline_markdown,
 )
 
 
@@ -39,12 +40,19 @@ def test_generate_markdown_skips_error_entries() -> None:
     assert "Review Comment by dev" in result
 
 
+def test_generate_non_inline_markdown_no_comments() -> None:
+    """Should handle empty non-inline comment list."""
+    result = generate_non_inline_markdown([])
+    assert result == "# Pull Request Non-Inline Comments\n\nNo comments found.\n"
+
+
 @pytest.mark.asyncio
 async def test_handle_list_tools(mcp_server: PRReviewServer) -> None:
     tools = await mcp_server.handle_list_tools()
     names = {tool.name for tool in tools}
     assert {
         "fetch_pr_review_comments",
+        "fetch_pr_non_inline_comments",
         "resolve_open_pr_url",
     } <= names
 
@@ -95,6 +103,17 @@ async def test_handle_call_tool_invalid_output(mcp_server: PRReviewServer) -> No
     with pytest.raises(ValueError, match="Invalid output"):
         await mcp_server.handle_call_tool(
             "fetch_pr_review_comments",
+            {"pr_url": "https://github.com/o/r/pull/1", "output": "text"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_handle_call_tool_non_inline_invalid_output(
+    mcp_server: PRReviewServer,
+) -> None:
+    with pytest.raises(ValueError, match="Invalid output"):
+        await mcp_server.handle_call_tool(
+            "fetch_pr_non_inline_comments",
             {"pr_url": "https://github.com/o/r/pull/1", "output": "text"},
         )
 
@@ -243,6 +262,35 @@ async def test_handle_call_tool_fetch_output_both(
 
 
 @pytest.mark.asyncio
+async def test_handle_call_tool_fetch_non_inline_output_both(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_server: PRReviewServer,
+) -> None:
+    async def mock_fetch(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "user": {"login": "alice"},
+                "body": "General note",
+                "created_at": "2025-01-01T00:00:00Z",
+                "html_url": "https://github.com/a/b/pull/1#issuecomment-1",
+            }
+        ]
+
+    monkeypatch.setattr(mcp_server, "fetch_pr_non_inline_comments", mock_fetch)
+
+    result = await mcp_server.handle_call_tool(
+        "fetch_pr_non_inline_comments",
+        {"pr_url": "https://github.com/a/b/pull/1", "output": "both"},
+    )
+
+    assert len(result) == 2
+    json_text = result[0].text
+    markdown_text = result[1].text
+    assert json.loads(json_text)[0]["body"] == "General note"
+    assert "Comment by alice" in markdown_text
+
+
+@pytest.mark.asyncio
 async def test_fetch_pr_review_comments_invalid_url(
     mcp_server: PRReviewServer,
 ) -> None:
@@ -286,6 +334,60 @@ async def test_handle_call_tool_passes_numeric_overrides(
 
     result = await mcp_server.handle_call_tool(
         "fetch_pr_review_comments",
+        {
+            "pr_url": "https://github.com/o/r/pull/1",
+            "per_page": 5,
+            "max_pages": 10,
+            "max_comments": 200,
+            "max_retries": 2,
+            "output": "json",
+        },
+    )
+
+    assert captured == {
+        "pr_url": "https://github.com/o/r/pull/1",
+        "per_page": 5,
+        "max_pages": 10,
+        "max_comments": 200,
+        "max_retries": 2,
+    }
+    assert result[0].text == "[]"
+
+
+@pytest.mark.asyncio
+async def test_handle_call_tool_non_inline_passes_numeric_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_server: PRReviewServer,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def mock_fetch(
+        pr_url: str,
+        *,
+        per_page: int | None,
+        max_pages: int | None,
+        max_comments: int | None,
+        max_retries: int | None,
+        select_strategy: str | None,
+        owner: str | None,
+        repo: str | None,
+        branch: str | None,
+    ) -> list[dict[str, Any]]:
+        captured.update(
+            {
+                "pr_url": pr_url,
+                "per_page": per_page,
+                "max_pages": max_pages,
+                "max_comments": max_comments,
+                "max_retries": max_retries,
+            }
+        )
+        return []
+
+    monkeypatch.setattr(mcp_server, "fetch_pr_non_inline_comments", mock_fetch)
+
+    result = await mcp_server.handle_call_tool(
+        "fetch_pr_non_inline_comments",
         {
             "pr_url": "https://github.com/o/r/pull/1",
             "per_page": 5,

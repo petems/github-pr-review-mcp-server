@@ -38,7 +38,9 @@ from .github_api_constants import (
     GITHUB_USER_AGENT,
 )
 from .models import (
+    FetchPRNonInlineCommentsArgs,
     FetchPRReviewCommentsArgs,
+    NonInlineCommentModel,
     ResolveOpenPrUrlArgs,
     ReviewCommentModel,
 )
@@ -944,21 +946,200 @@ async def fetch_pr_comments(
         raise
 
 
+async def fetch_pr_non_inline_comments_rest(
+    owner: str,
+    repo: str,
+    pull_number: int,
+    *,
+    host: str = "github.com",
+    per_page: int | None = None,
+    max_pages: int | None = None,
+    max_comments: int | None = None,
+    max_retries: int | None = None,
+) -> list[CommentResult] | None:
+    """
+    Fetch non-inline pull request comments from the GitHub Issues API.
+
+    These are conversation-level comments on the PR itself (not code-line
+    review comments).
+    """
+    logger.debug(
+        "Fetching non-inline PR comments via REST",
+        extra={"owner": owner, "repo": repo, "pull_number": pull_number},
+    )
+    token = os.getenv("GITHUB_TOKEN")
+    headers: dict[str, str] = {
+        "Accept": GITHUB_ACCEPT_HEADER,
+        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        "User-Agent": GITHUB_USER_AGENT,
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    safe_owner = quote(owner, safe="")
+    safe_repo = quote(repo, safe="")
+
+    per_page_v = _int_conf("HTTP_PER_PAGE", 100, 1, 100, per_page)
+    max_pages_v = _int_conf("PR_FETCH_MAX_PAGES", 50, 1, 200, max_pages)
+    max_comments_v = _int_conf("PR_FETCH_MAX_COMMENTS", 2000, 100, 100000, max_comments)
+    max_retries_v = _int_conf("HTTP_MAX_RETRIES", 3, 0, 10, max_retries)
+
+    api_base = api_base_for_host(host)
+    base_url = (
+        f"{api_base}/repos/"
+        f"{safe_owner}/{safe_repo}/issues/{pull_number}/comments?per_page={per_page_v}"
+    )
+    all_comments: list[CommentResult] = []
+    url: str | None = base_url
+    page_count = 0
+
+    total_timeout = _float_conf("HTTP_TIMEOUT", 30.0, TIMEOUT_MIN, TIMEOUT_MAX)
+    connect_timeout = _float_conf(
+        "HTTP_CONNECT_TIMEOUT", 10.0, CONNECT_TIMEOUT_MIN, CONNECT_TIMEOUT_MAX
+    )
+
+    try:
+        timeout = httpx.Timeout(timeout=total_timeout, connect=connect_timeout)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            used_token_fallback = False
+            had_server_error = False
+            rate_limit_handler = RateLimitHandler("fetch_pr_non_inline_comments")
+            while url:
+                logger.debug(
+                    "Fetching REST API page for non-inline comments",
+                    extra={"page_number": page_count + 1, "url": url},
+                )
+
+                async def handle_rest_status(
+                    resp: httpx.Response, _attempt: int
+                ) -> str | None:
+                    nonlocal used_token_fallback, had_server_error
+
+                    if 500 <= resp.status_code < 600:
+                        had_server_error = True
+
+                    if (
+                        resp.status_code == 401
+                        and token
+                        and not used_token_fallback
+                        and headers.get("Authorization", "").startswith("Bearer ")
+                    ):
+                        logger.warning(
+                            "401 Unauthorized with Bearer token; "
+                            "retrying with legacy token scheme",
+                            extra={
+                                "status_code": 401,
+                                "auth_fallback": "bearer_to_token",
+                            },
+                        )
+                        headers["Authorization"] = f"token {token}"
+                        used_token_fallback = True
+                        return "retry"
+
+                    return await rate_limit_handler.handle_rate_limit(resp)
+
+                current_page_url = url
+
+                async def make_rest_request(
+                    page_url: str = current_page_url,
+                ) -> httpx.Response:
+                    return await client.get(page_url, headers=headers)
+
+                try:
+                    response = await _retry_http_request(
+                        make_rest_request,
+                        max_retries_v,
+                        status_handler=handle_rest_status,
+                    )
+                except SecondaryRateLimitError:
+                    return None
+                except httpx.HTTPStatusError as e:
+                    if 500 <= e.response.status_code < 600:
+                        return None
+                    raise
+
+                if had_server_error:
+                    return None
+
+                page_comments = response.json()
+                if not isinstance(page_comments, list) or not all(
+                    isinstance(c, dict) for c in page_comments
+                ):
+                    return None
+
+                for comment in page_comments:
+                    non_inline_comment_model = NonInlineCommentModel.from_rest(comment)
+                    all_comments.append(
+                        non_inline_comment_model.model_dump(exclude_none=True)
+                    )
+                page_count += 1
+
+                if page_count >= max_pages_v or len(all_comments) >= max_comments_v:
+                    print(
+                        "Reached safety limits for pagination; stopping early",
+                        file=sys.stderr,
+                    )
+                    break
+
+                link_header = response.headers.get("Link")
+                next_url: str | None = None
+                if link_header:
+                    match = re.search(r"<([^>]+)>;\s*rel=\"next\"", link_header)
+                    next_url = match.group(1) if match else None
+                logger.debug("REST next page", extra={"next_url": next_url})
+                if next_url:
+                    url = next_url
+                else:
+                    break
+
+        logger.info(
+            "Successfully fetched non-inline comments via REST",
+            extra={"total_comments": len(all_comments), "page_count": page_count},
+        )
+        return all_comments
+
+    except httpx.TimeoutException as e:
+        logger.error(
+            "Timeout fetching non-inline PR comments via REST",
+            extra={
+                "error": str(e),
+                "owner": owner,
+                "repo": repo,
+                "pull_number": pull_number,
+            },
+        )
+        traceback.print_exc(file=sys.stderr)
+        return None
+    except httpx.RequestError as e:
+        logger.error(
+            "Error fetching non-inline PR comments via REST",
+            extra={
+                "error": str(e),
+                "owner": owner,
+                "repo": repo,
+                "pull_number": pull_number,
+            },
+        )
+        traceback.print_exc(file=sys.stderr)
+        raise
+
+
+def _fence_for(text: str, minimum: int = 3) -> str:
+    """Choose a backtick fence longer than any backtick run in the text."""
+    longest_run = 0
+    current = 0
+    for ch in text or "":
+        if ch == "`":
+            current += 1
+            if current > longest_run:
+                longest_run = current
+        else:
+            current = 0
+    return "`" * max(minimum, longest_run + 1)
+
+
 def generate_markdown(comments: Sequence[CommentResult]) -> str:
     """Generates a markdown string from a list of review comments."""
-
-    def fence_for(text: str, minimum: int = 3) -> str:
-        # Choose a backtick fence longer than any run of backticks in the text
-        longest_run = 0
-        current = 0
-        for ch in text or "":
-            if ch == "`":
-                current += 1
-                if current > longest_run:
-                    longest_run = current
-            else:
-                current = 0
-        return "`" * max(minimum, longest_run + 1)
 
     markdown = "# Pull Request Review Comments\n\n"
     if not comments:
@@ -1009,18 +1190,58 @@ def generate_markdown(comments: Sequence[CommentResult]) -> str:
 
         # Escape comment body to prevent XSS - this is the main attack vector
         body = escape_html_safe(comment.get("body", ""))
-        body_fence = fence_for(body)
+        body_fence = _fence_for(body)
         markdown += f"**Comment:**\n{body_fence}\n{body}\n{body_fence}\n\n"
 
         if "diff_hunk" in comment:
             # Escape diff content to prevent injection through malicious diffs
             diff_text = escape_html_safe(comment["diff_hunk"])
-            diff_fence = fence_for(diff_text)
+            diff_fence = _fence_for(diff_text)
             # Language hint remains after the opening fence
             markdown += (
                 f"**Code Snippet:**\n{diff_fence}diff\n{diff_text}\n{diff_fence}\n\n"
             )
         markdown += "---\n\n"
+    return markdown
+
+
+def generate_non_inline_markdown(comments: Sequence[CommentResult]) -> str:
+    """Generate markdown for non-inline pull request comments."""
+    markdown = "# Pull Request Non-Inline Comments\n\n"
+    if not comments:
+        return markdown + "No comments found.\n"
+
+    for comment in comments:
+        if "error" in comment:
+            continue
+
+        user_data = comment.get("user")
+        login = user_data.get("login", "N/A") if isinstance(user_data, dict) else "N/A"
+        username = escape_html_safe(login)
+        markdown += f"## Comment by {username}\n\n"
+
+        created_at = comment.get("created_at")
+        if created_at:
+            markdown += f"**Created:** {escape_html_safe(created_at)}\n"
+
+        updated_at = comment.get("updated_at")
+        if updated_at and updated_at != created_at:
+            markdown += f"**Updated:** {escape_html_safe(updated_at)}\n"
+
+        comment_url = comment.get("html_url") or comment.get("url")
+        if comment_url:
+            markdown += f"**URL:** {escape_html_safe(comment_url)}\n"
+
+        association = comment.get("author_association")
+        if association:
+            markdown += f"**Author Association:** {escape_html_safe(association)}\n"
+
+        markdown += "\n"
+        body = escape_html_safe(comment.get("body", ""))
+        body_fence = _fence_for(body)
+        markdown += f"**Comment:**\n{body_fence}\n{body}\n{body_fence}\n\n"
+        markdown += "---\n\n"
+
     return markdown
 
 
@@ -1057,6 +1278,86 @@ class PRReviewServer:
                     "formatted Markdown by default (optimized for LLM consumption), "
                     "or JSON for programmatic use. Automatically detects PR from "
                     "current git branch if URL omitted."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "pr_url": {
+                            "type": "string",
+                            "description": (
+                                "The full URL of the GitHub pull request. If omitted, "
+                                "the server will try to resolve the PR for the current "
+                                "git repo and branch."
+                            ),
+                        },
+                        "output": {
+                            "type": "string",
+                            "enum": ["markdown", "json", "both"],
+                            "description": (
+                                "Output format. Default 'markdown'. Use 'json' for "
+                                "raw data; 'both' returns json then markdown."
+                            ),
+                        },
+                        "select_strategy": {
+                            "type": "string",
+                            "enum": ["branch", "latest", "first", "error"],
+                            "description": (
+                                "Strategy when auto-resolving a PR (default 'branch')."
+                            ),
+                        },
+                        "owner": {
+                            "type": "string",
+                            "description": "Override repo owner for PR resolution",
+                        },
+                        "repo": {
+                            "type": "string",
+                            "description": "Override repo name for PR resolution",
+                        },
+                        "branch": {
+                            "type": "string",
+                            "description": "Override branch name for PR resolution",
+                        },
+                        "per_page": {
+                            "type": "integer",
+                            "description": "GitHub API page size (1-100)",
+                            "minimum": 1,
+                            "maximum": 100,
+                        },
+                        "max_pages": {
+                            "type": "integer",
+                            "description": (
+                                "Max number of pages to fetch (server-capped)"
+                            ),
+                            "minimum": 1,
+                            "maximum": 200,
+                        },
+                        "max_comments": {
+                            "type": "integer",
+                            "description": (
+                                "Max total comments to collect (server-capped)"
+                            ),
+                            "minimum": 100,
+                            "maximum": 100000,
+                        },
+                        "max_retries": {
+                            "type": "integer",
+                            "description": (
+                                "Max retries for transient errors (server-capped)"
+                            ),
+                            "minimum": 0,
+                            "maximum": 10,
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="fetch_pr_non_inline_comments",
+                description=(
+                    "Fetches non-inline conversation comments from a GitHub PR "
+                    "(issue comments on the pull request timeline). Returns "
+                    "formatted Markdown by default, or JSON for programmatic use. "
+                    "Automatically detects PR from current git branch if URL "
+                    "omitted."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1182,12 +1483,13 @@ class PRReviewServer:
 
         Parameters:
             name (str): The tool identifier to invoke (e.g.,
-                "fetch_pr_review_comments", "resolve_open_pr_url").
+                "fetch_pr_review_comments", "fetch_pr_non_inline_comments",
+                "resolve_open_pr_url").
             arguments (dict[str, Any]): Tool-specific arguments; expected keys
                 depend on `name` (for example, "pr_url", "per_page",
                 "max_pages", "max_comments", "max_retries",
                 "select_strategy", "owner", "repo", "branch", and "output" for
-                "fetch_pr_review_comments").
+                fetch tools).
 
         Returns:
             Sequence[TextContent]: One or more text outputs produced by the
@@ -1211,12 +1513,14 @@ class PRReviewServer:
                 traceback.print_exc(file=sys.stderr)
                 raise RuntimeError(error_msg) from exc
 
-        if name == "fetch_pr_review_comments":
-            # Validate arguments using Pydantic model
+        def _validate_fetch_tool_args(
+            args: dict[str, Any],
+            args_model: type[FetchPRReviewCommentsArgs]
+            | type[FetchPRNonInlineCommentsArgs],
+        ) -> dict[str, Any]:
             try:
-                validated_args = FetchPRReviewCommentsArgs.model_validate(arguments)
+                validated_args = args_model.model_validate(args)
             except ValidationError as e:
-                # Transform Pydantic validation errors to ValueError
                 errors = e.errors()
                 if errors:
                     first_error = errors[0]
@@ -1224,14 +1528,11 @@ class PRReviewServer:
                     msg = first_error["msg"]
                     error_type = first_error["type"]
 
-                    # Handle different error types
                     if error_type == "value_error":
-                        # This is from our custom field_validator rejecting bool/float
                         raise ValueError(
                             f"Invalid type for {field}: expected integer"
                         ) from None
                     if error_type == "literal_error":
-                        # Distinguish between output and select_strategy fields
                         if field == "output":
                             raise ValueError(
                                 f"Invalid {field}: "
@@ -1251,12 +1552,7 @@ class PRReviewServer:
                         "greater_than_equal" in error_type
                         or "less_than_equal" in error_type
                     ):
-                        # Extract actual range from field constraints
-                        field_info = FetchPRReviewCommentsArgs.model_fields.get(
-                            str(field)
-                        )
-
-                        # Try to get constraints from field_info metadata
+                        field_info = args_model.model_fields.get(str(field))
                         min_val = None
                         max_val = None
                         if field_info and field_info.metadata:
@@ -1266,7 +1562,6 @@ class PRReviewServer:
                                 if hasattr(constraint, "le"):
                                     max_val = constraint.le
 
-                        # Fall back to error context from Pydantic
                         if min_val is None or max_val is None:
                             error_ctx = first_error.get("ctx") or {}
                             if min_val is None:
@@ -1274,7 +1569,6 @@ class PRReviewServer:
                             if max_val is None:
                                 max_val = error_ctx.get("le")
 
-                        # Build error message with available constraints
                         if min_val is not None and max_val is not None:
                             raise ValueError(
                                 f"Invalid value for {field}: "
@@ -1288,19 +1582,24 @@ class PRReviewServer:
                             raise ValueError(
                                 f"Invalid value for {field}: must be <= {max_val}"
                             ) from None
-
-                        # Final fallback
                         raise ValueError(
                             f"Invalid value for {field}: out of range"
                         ) from None
                     raise ValueError(f"Invalid value for {field}: {msg}") from None
                 raise ValueError("Invalid arguments") from None
 
-            # Extract validated arguments
-            args_dict = validated_args.model_dump(exclude_none=True)
+            return validated_args.model_dump(exclude_none=True)
 
+        async def _run_fetch_tool(
+            *,
+            args_model: type[FetchPRReviewCommentsArgs]
+            | type[FetchPRNonInlineCommentsArgs],
+            fetcher: Callable[..., Awaitable[list[CommentResult]]],
+            markdown_renderer: Callable[[Sequence[CommentResult]], str],
+        ) -> list[TextContent]:
+            args_dict = _validate_fetch_tool_args(arguments, args_model)
             comments = await _run_with_handling(
-                lambda: self.fetch_pr_review_comments(
+                lambda: fetcher(
                     pr_url=args_dict.get("pr_url"),
                     per_page=args_dict.get("per_page"),
                     max_pages=args_dict.get("max_pages"),
@@ -1312,21 +1611,33 @@ class PRReviewServer:
                     branch=args_dict.get("branch"),
                 )
             )
-
             output = args_dict.get("output", "markdown")
 
-            # Build responses according to requested format (default markdown)
             results: list[TextContent] = []
             if output in ("json", "both"):
                 results.append(TextContent(type="text", text=json.dumps(comments)))
             if output in ("markdown", "both"):
                 try:
-                    md = generate_markdown(comments)
+                    md = markdown_renderer(comments)
                 except (AttributeError, KeyError, TypeError, IndexError) as exc:
                     traceback.print_exc(file=sys.stderr)
                     md = f"# Error\n\nFailed to generate markdown from comments: {exc}"
                 results.append(TextContent(type="text", text=md))
             return results
+
+        if name == "fetch_pr_review_comments":
+            return await _run_fetch_tool(
+                args_model=FetchPRReviewCommentsArgs,
+                fetcher=self.fetch_pr_review_comments,
+                markdown_renderer=generate_markdown,
+            )
+
+        if name == "fetch_pr_non_inline_comments":
+            return await _run_fetch_tool(
+                args_model=FetchPRNonInlineCommentsArgs,
+                fetcher=self.fetch_pr_non_inline_comments,
+                markdown_renderer=generate_non_inline_markdown,
+            )
 
         if name == "resolve_open_pr_url":
             # Validate arguments using Pydantic model
@@ -1459,6 +1770,56 @@ class PRReviewServer:
             return comments if comments is not None else []
         except ValueError as e:
             error_msg = f"Error in fetch_pr_review_comments: {str(e)}"
+            print(error_msg, file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            return [{"error": error_msg}]
+
+    async def fetch_pr_non_inline_comments(
+        self,
+        pr_url: str | None,
+        *,
+        per_page: int | None = None,
+        max_pages: int | None = None,
+        max_comments: int | None = None,
+        max_retries: int | None = None,
+        select_strategy: str | None = None,
+        owner: str | None = None,
+        repo: str | None = None,
+        branch: str | None = None,
+    ) -> list[CommentResult]:
+        """Fetch non-inline conversation comments for a pull request."""
+        print(
+            f"Tool 'fetch_pr_non_inline_comments' called with pr_url: {pr_url}",
+            file=sys.stderr,
+        )
+        try:
+            if not pr_url:
+                tool_resp = await self.handle_call_tool(
+                    "resolve_open_pr_url",
+                    {
+                        "select_strategy": select_strategy or "branch",
+                        "owner": owner,
+                        "repo": repo,
+                        "branch": branch,
+                    },
+                )
+                pr_url = tool_resp[0].text
+
+            host, owner, repo, pull_number_str = get_pr_info(pr_url)
+            pull_number = int(pull_number_str)
+            comments = await fetch_pr_non_inline_comments_rest(
+                owner,
+                repo,
+                pull_number,
+                host=host,
+                per_page=per_page,
+                max_pages=max_pages,
+                max_comments=max_comments,
+                max_retries=max_retries,
+            )
+            return comments if comments is not None else []
+        except ValueError as e:
+            error_msg = f"Error in fetch_pr_non_inline_comments: {str(e)}"
             print(error_msg, file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             return [{"error": error_msg}]

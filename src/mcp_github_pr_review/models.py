@@ -189,6 +189,42 @@ class ReviewCommentModel(BaseModel):
         )
 
 
+class NonInlineCommentModel(BaseModel):
+    """Represents a non-inline pull request comment from the Issues API."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        validate_assignment=True,
+    )
+
+    id: int | str | None = None
+    user: GitHubUserModel
+    body: str = Field(default="")
+    created_at: str | None = None
+    updated_at: str | None = None
+    url: str | None = None
+    html_url: str | None = None
+    author_association: str | None = None
+
+    @classmethod
+    def from_rest(cls, data: dict[str, Any]) -> NonInlineCommentModel:
+        """Create a NonInlineCommentModel from REST API response data."""
+        user_data = data.get("user") or {}
+        user_login = user_data.get("login", "unknown")
+        body = data.get("body") or ""
+
+        return cls(
+            id=data.get("id"),
+            user=GitHubUserModel(login=user_login),
+            body=body,
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
+            url=data.get("url"),
+            html_url=data.get("html_url"),
+            author_association=data.get("author_association"),
+        )
+
+
 class FetchPRReviewCommentsArgs(BaseModel):
     """Arguments for the fetch_pr_review_comments MCP tool.
 
@@ -221,6 +257,40 @@ class FetchPRReviewCommentsArgs(BaseModel):
         This mimics the behavior of the original _validate_int function.
         Runs before Pydantic's type coercion.
         """
+        if v is None:
+            return v
+        if isinstance(v, bool):
+            raise ValueError("Invalid type: expected integer")
+        if isinstance(v, float):
+            raise ValueError("Invalid type: expected integer")
+        return v
+
+
+class FetchPRNonInlineCommentsArgs(BaseModel):
+    """Arguments for the fetch_pr_non_inline_comments MCP tool."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        validate_assignment=True,
+    )
+
+    pr_url: str | None = None
+    output: Literal["markdown", "json", "both"] = "markdown"
+    per_page: int | None = Field(default=None, ge=1, le=100)
+    max_pages: int | None = Field(default=None, ge=1, le=200)
+    max_comments: int | None = Field(default=None, ge=100, le=100000)
+    max_retries: int | None = Field(default=None, ge=0, le=10)
+    owner: str | None = None
+    repo: str | None = None
+    branch: str | None = None
+    select_strategy: Literal["branch", "latest", "first", "error"] = "branch"
+
+    @field_validator(
+        "per_page", "max_pages", "max_comments", "max_retries", mode="before"
+    )
+    @classmethod
+    def _reject_bool_and_float(cls, v: Any) -> Any:
+        """Reject boolean and float values for numeric fields."""
         if v is None:
             return v
         if isinstance(v, bool):
