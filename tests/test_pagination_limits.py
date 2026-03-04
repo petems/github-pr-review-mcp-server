@@ -59,8 +59,8 @@ async def test_comment_count_limit_stops_early(mock_http_client) -> None:
 
     We enqueue pages with 60 comments each and set max_comments=100 (the
     implementation clamps small values up to a minimum of 100). The function
-    processes page 1 (60 items) and page 2 (60 items), then stops because
-    120 >= 100.
+    processes page 1 fully (60 items), then ingests only the first 40 comments
+    of page 2 before hitting the cap and stopping.
     We assert no third page is fetched.
     """
     headers_with_next = {"Link": '<https://api.github.com/next>; rel="next"'}
@@ -77,8 +77,8 @@ async def test_comment_count_limit_stops_early(mock_http_client) -> None:
     )
 
     assert isinstance(comments, list)
-    # Page 1: 60, Page 2: 60 -> total 120 (>= 100), then stop
-    assert len(comments) == 120, "Stops after exceeding max_comments"
-    assert len(mock_http_client.get_calls) == 2, (
-        "Should not fetch a third page once limit reached"
-    )
+    # Page 1: 60, Page 2: only 40 ingested -> total 100, then stop
+    assert len(comments) == 100, "Should cap returned comments at max_comments"
+    assert (
+        len(mock_http_client.get_calls) == 2
+    ), "Should not fetch a third page once limit reached"

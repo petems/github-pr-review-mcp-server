@@ -928,6 +928,8 @@ async def _fetch_pr_comments_rest_generic(
                     return None
 
                 for comment in page_comments:
+                    if len(all_comments) >= max_comments_v:
+                        break
                     all_comments.append(comment_from_rest(comment))
                 page_count += 1
 
