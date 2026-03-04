@@ -59,9 +59,9 @@ uv run ruff format --check . && uv run ruff check . && uv run mypy . && make com
   - `uv run --extra dev pre-commit run --all-files`
 - If `pre-commit install` is blocked by a global `core.hooksPath` (for example `/usr/local/dd/global_hooks`), install hooks directly into the repo's `.git/hooks` via pre-commit's install API.
 - In this repository, that produced:
-  - `/Users/peter.souter/projects/github-pr-review-mcp-server/.git/hooks/pre-commit`
-  - `/Users/peter.souter/projects/github-pr-review-mcp-server/.git/hooks/commit-msg`
-- Ensure both hook scripts exist and are executable. The global hook chain should call into these repo-level hooks.
+  - `<repo>/.git/hooks/pre-commit`
+  - `<repo>/.git/hooks/commit-msg`
+- Ensure both hook scripts exist and are executable. Treat these as example paths and adapt for your local environment. The global hook chain should call into these repo-level hooks.
 
 ## HTTP Transport
 
