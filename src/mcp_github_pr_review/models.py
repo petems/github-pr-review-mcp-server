@@ -225,11 +225,8 @@ class NonInlineCommentModel(BaseModel):
         )
 
 
-class FetchPRReviewCommentsArgs(BaseModel):
-    """Arguments for the fetch_pr_review_comments MCP tool.
-
-    All numeric fields have server-enforced limits to prevent runaway operations.
-    """
+class _BaseFetchPRCommentsArgs(BaseModel):
+    """Shared arguments and validation for PR comment fetch tools."""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -266,38 +263,15 @@ class FetchPRReviewCommentsArgs(BaseModel):
         return v
 
 
-class FetchPRNonInlineCommentsArgs(BaseModel):
+class FetchPRReviewCommentsArgs(_BaseFetchPRCommentsArgs):
+    """Arguments for the fetch_pr_review_comments MCP tool.
+
+    All numeric fields have server-enforced limits to prevent runaway operations.
+    """
+
+
+class FetchPRNonInlineCommentsArgs(_BaseFetchPRCommentsArgs):
     """Arguments for the fetch_pr_non_inline_comments MCP tool."""
-
-    model_config = ConfigDict(
-        extra="forbid",
-        validate_assignment=True,
-    )
-
-    pr_url: str | None = None
-    output: Literal["markdown", "json", "both"] = "markdown"
-    per_page: int | None = Field(default=None, ge=1, le=100)
-    max_pages: int | None = Field(default=None, ge=1, le=200)
-    max_comments: int | None = Field(default=None, ge=100, le=100000)
-    max_retries: int | None = Field(default=None, ge=0, le=10)
-    owner: str | None = None
-    repo: str | None = None
-    branch: str | None = None
-    select_strategy: Literal["branch", "latest", "first", "error"] = "branch"
-
-    @field_validator(
-        "per_page", "max_pages", "max_comments", "max_retries", mode="before"
-    )
-    @classmethod
-    def _reject_bool_and_float(cls, v: Any) -> Any:
-        """Reject boolean and float values for numeric fields."""
-        if v is None:
-            return v
-        if isinstance(v, bool):
-            raise ValueError("Invalid type: expected integer")
-        if isinstance(v, float):
-            raise ValueError("Invalid type: expected integer")
-        return v
 
 
 class ResolveOpenPrUrlArgs(BaseModel):

@@ -743,26 +743,85 @@ async def fetch_pr_comments(
     max_retries: int | None = None,
 ) -> list[CommentResult] | None:
     """
-    Fetch and combine review comments for a pull request by iterating
-    the repository REST API pagination.
+    Fetch and combine inline review comments for a pull request via REST.
 
     Parameters:
-        per_page (int | None): Override for number of comments to
-            request per page.
-        max_pages (int | None): Override for maximum number of pages
-            to fetch.
-        max_comments (int | None): Override for a hard limit on total
-            comments to collect.
-        max_retries (int | None): Override for maximum retry attempts
-            on transient errors.
+        per_page (int | None): Override for number of comments to request per page.
+        max_pages (int | None): Override for maximum number of pages to fetch.
+        max_comments (int | None): Override for hard limit on total comments.
+        max_retries (int | None): Override for transient error retry count.
 
     Returns:
-        list[CommentResult] with comments combined from all fetched
-            pages, or `None` when fetching fails due to timeouts or
-            unrecoverable server errors.
+        list[CommentResult] or None when fetching fails/times out.
+    """
+
+    def _convert_review_comment(comment: dict[str, Any]) -> CommentResult:
+        return ReviewCommentModel.from_rest(comment).model_dump(exclude_none=True)
+
+    return await _fetch_pr_comments_rest_generic(
+        owner=owner,
+        repo=repo,
+        pull_number=pull_number,
+        host=host,
+        per_page=per_page,
+        max_pages=max_pages,
+        max_comments=max_comments,
+        max_retries=max_retries,
+        endpoint_template="/pulls/{pull_number}/comments",
+        context_name="fetch_pr_comments",
+        fetch_log_message="Fetching PR comments via REST",
+        page_log_message="Fetching REST API page",
+        success_log_message="Successfully fetched comments via REST",
+        timeout_log_message="Timeout fetching PR comments via REST",
+        request_error_log_message="Error fetching PR comments via REST",
+        comment_from_rest=_convert_review_comment,
+        emit_debug_page_count=True,
+    )
+
+
+async def _fetch_pr_comments_rest_generic(
+    owner: str,
+    repo: str,
+    pull_number: int,
+    *,
+    host: str = "github.com",
+    per_page: int | None = None,
+    max_pages: int | None = None,
+    max_comments: int | None = None,
+    max_retries: int | None = None,
+    endpoint_template: str,
+    context_name: str,
+    fetch_log_message: str,
+    page_log_message: str,
+    success_log_message: str,
+    timeout_log_message: str,
+    request_error_log_message: str,
+    comment_from_rest: Callable[[dict[str, Any]], CommentResult],
+    emit_debug_page_count: bool = False,
+) -> list[CommentResult] | None:
+    """
+    Generic REST fetcher for pull request comments with pagination and retries.
+
+    This powers both inline review comments and non-inline issue comments by
+    parameterizing endpoint path, model conversion, and log context.
+
+    Parameters:
+        endpoint_template: Path template such as
+            "/pulls/{pull_number}/comments" or "/issues/{pull_number}/comments".
+        context_name: Context string for RateLimitHandler and structured logs.
+        fetch_log_message: Initial fetch debug message.
+        page_log_message: Per-page debug message.
+        success_log_message: Success info message.
+        timeout_log_message: Timeout error message.
+        request_error_log_message: Request error message.
+        comment_from_rest: Converter from raw REST payload item to comment dict.
+        emit_debug_page_count: Whether to emit legacy page-count debug output.
+
+    Returns:
+        list[CommentResult] or None when fetching fails/times out.
     """
     logger.debug(
-        "Fetching PR comments via REST",
+        fetch_log_message,
         extra={"owner": owner, "repo": repo, "pull_number": pull_number},
     )
     token = os.getenv("GITHUB_TOKEN")
@@ -775,207 +834,6 @@ async def fetch_pr_comments(
         # Use Bearer prefix for fine-grained tokens
         headers["Authorization"] = f"Bearer {token}"
 
-    # URL-encode owner/repo to be safe, even though regex validation restricts format
-    safe_owner = quote(owner, safe="")
-    safe_repo = quote(repo, safe="")
-
-    # Load configurable limits from environment with safe defaults; allow per-call
-    # overrides
-    per_page_v = _int_conf("HTTP_PER_PAGE", 100, 1, 100, per_page)
-    max_pages_v = _int_conf("PR_FETCH_MAX_PAGES", 50, 1, 200, max_pages)
-    max_comments_v = _int_conf("PR_FETCH_MAX_COMMENTS", 2000, 100, 100000, max_comments)
-    max_retries_v = _int_conf("HTTP_MAX_RETRIES", 3, 0, 10, max_retries)
-
-    api_base = api_base_for_host(host)
-    base_url = (
-        f"{api_base}/repos/"
-        f"{safe_owner}/{safe_repo}/pulls/{pull_number}/comments?per_page={per_page_v}"
-    )
-    all_comments: list[CommentResult] = []
-    url: str | None = base_url
-    page_count = 0
-
-    # Load timeout configuration
-    total_timeout = _float_conf("HTTP_TIMEOUT", 30.0, TIMEOUT_MIN, TIMEOUT_MAX)
-    connect_timeout = _float_conf(
-        "HTTP_CONNECT_TIMEOUT", 10.0, CONNECT_TIMEOUT_MIN, CONNECT_TIMEOUT_MAX
-    )
-
-    try:
-        timeout = httpx.Timeout(timeout=total_timeout, connect=connect_timeout)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            used_token_fallback = False
-            had_server_error = False
-            rate_limit_handler = RateLimitHandler("fetch_pr_comments")
-            while url:
-                logger.debug(
-                    "Fetching REST API page",
-                    extra={"page_number": page_count + 1, "url": url},
-                )
-
-                # Status handler for REST-specific logic (rate limiting, auth fallback)
-                async def handle_rest_status(
-                    resp: httpx.Response, _attempt: int
-                ) -> str | None:
-                    nonlocal used_token_fallback, had_server_error
-
-                    # Track 5xx errors for conservative failure behavior
-                    if 500 <= resp.status_code < 600:
-                        had_server_error = True
-
-                    # 401 Bearer token fallback
-                    if (
-                        resp.status_code == 401
-                        and token
-                        and not used_token_fallback
-                        and headers.get("Authorization", "").startswith("Bearer ")
-                    ):
-                        logger.warning(
-                            "401 Unauthorized with Bearer token; "
-                            "retrying with legacy token scheme",
-                            extra={
-                                "status_code": 401,
-                                "auth_fallback": "bearer_to_token",
-                            },
-                        )
-                        headers["Authorization"] = f"token {token}"
-                        used_token_fallback = True
-                        return "retry"
-
-                    # Rate limiting (delegated to RateLimitHandler)
-                    return await rate_limit_handler.handle_rate_limit(resp)
-
-                # Use retry helper with custom status handler (capture loop variable)
-                current_page_url = url  # Captured by while loop type narrowing
-
-                async def make_rest_request(
-                    page_url: str = current_page_url,
-                ) -> httpx.Response:
-                    return await client.get(page_url, headers=headers)
-
-                try:
-                    response = await _retry_http_request(
-                        make_rest_request,
-                        max_retries_v,
-                        status_handler=handle_rest_status,
-                    )
-                except SecondaryRateLimitError:
-                    # Logging already done in RateLimitHandler
-                    return None
-                except httpx.HTTPStatusError as e:
-                    # On exhausted 5xx retries, return None per test expectations
-                    if 500 <= e.response.status_code < 600:
-                        return None
-                    raise
-
-                # Conservative behavior: return None if any server error occurred,
-                # even if retry succeeded
-                if had_server_error:
-                    return None
-
-                # Process page
-                page_comments = response.json()
-                if not isinstance(page_comments, list) or not all(
-                    isinstance(c, dict) for c in page_comments
-                ):
-                    return None
-                # Convert REST comments using Pydantic model
-                for comment in page_comments:
-                    review_comment_model = ReviewCommentModel.from_rest(comment)
-                    all_comments.append(
-                        review_comment_model.model_dump(exclude_none=True)
-                    )
-                page_count += 1
-
-                # Enforce safety bounds to prevent unbounded memory/time use
-                print(
-                    "DEBUG: page_count="
-                    f"{page_count}, MAX_PAGES={max_pages_v}, "
-                    f"comments_len={len(all_comments)}",
-                    file=sys.stderr,
-                )
-                if page_count >= max_pages_v or len(all_comments) >= max_comments_v:
-                    print(
-                        "Reached safety limits for pagination; stopping early",
-                        file=sys.stderr,
-                    )
-                    break
-
-                # Check for next page using Link header
-                link_header = response.headers.get("Link")
-                next_url: str | None = None
-                if link_header:
-                    match = re.search(r"<([^>]+)>;\s*rel=\"next\"", link_header)
-                    next_url = match.group(1) if match else None
-                logger.debug("REST next page", extra={"next_url": next_url})
-                if next_url:
-                    url = next_url
-                else:
-                    break
-
-        total_comments = len(all_comments)
-        logger.info(
-            "Successfully fetched comments via REST",
-            extra={"total_comments": total_comments, "page_count": page_count},
-        )
-        return all_comments
-
-    except httpx.TimeoutException as e:
-        logger.error(
-            "Timeout fetching PR comments via REST",
-            extra={
-                "error": str(e),
-                "owner": owner,
-                "repo": repo,
-                "pull_number": pull_number,
-            },
-        )
-        traceback.print_exc(file=sys.stderr)
-        return None
-    except httpx.RequestError as e:
-        logger.error(
-            "Error fetching PR comments via REST",
-            extra={
-                "error": str(e),
-                "owner": owner,
-                "repo": repo,
-                "pull_number": pull_number,
-            },
-        )
-        traceback.print_exc(file=sys.stderr)
-        raise
-
-
-async def fetch_pr_non_inline_comments_rest(
-    owner: str,
-    repo: str,
-    pull_number: int,
-    *,
-    host: str = "github.com",
-    per_page: int | None = None,
-    max_pages: int | None = None,
-    max_comments: int | None = None,
-    max_retries: int | None = None,
-) -> list[CommentResult] | None:
-    """
-    Fetch non-inline pull request comments from the GitHub Issues API.
-
-    These are conversation-level comments on the PR itself (not code-line
-    review comments).
-    """
-    logger.debug(
-        "Fetching non-inline PR comments via REST",
-        extra={"owner": owner, "repo": repo, "pull_number": pull_number},
-    )
-    token = os.getenv("GITHUB_TOKEN")
-    headers: dict[str, str] = {
-        "Accept": GITHUB_ACCEPT_HEADER,
-        "X-GitHub-Api-Version": GITHUB_API_VERSION,
-        "User-Agent": GITHUB_USER_AGENT,
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
     safe_owner = quote(owner, safe="")
     safe_repo = quote(repo, safe="")
 
@@ -987,7 +845,9 @@ async def fetch_pr_non_inline_comments_rest(
     api_base = api_base_for_host(host)
     base_url = (
         f"{api_base}/repos/"
-        f"{safe_owner}/{safe_repo}/issues/{pull_number}/comments?per_page={per_page_v}"
+        f"{safe_owner}/{safe_repo}"
+        f"{endpoint_template.format(pull_number=pull_number)}"
+        f"?per_page={per_page_v}"
     )
     all_comments: list[CommentResult] = []
     url: str | None = base_url
@@ -1003,10 +863,10 @@ async def fetch_pr_non_inline_comments_rest(
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             used_token_fallback = False
             had_server_error = False
-            rate_limit_handler = RateLimitHandler("fetch_pr_non_inline_comments")
+            rate_limit_handler = RateLimitHandler(context_name)
             while url:
                 logger.debug(
-                    "Fetching REST API page for non-inline comments",
+                    page_log_message,
                     extra={"page_number": page_count + 1, "url": url},
                 )
 
@@ -1068,12 +928,16 @@ async def fetch_pr_non_inline_comments_rest(
                     return None
 
                 for comment in page_comments:
-                    non_inline_comment_model = NonInlineCommentModel.from_rest(comment)
-                    all_comments.append(
-                        non_inline_comment_model.model_dump(exclude_none=True)
-                    )
+                    all_comments.append(comment_from_rest(comment))
                 page_count += 1
 
+                if emit_debug_page_count:
+                    print(
+                        "DEBUG: page_count="
+                        f"{page_count}, MAX_PAGES={max_pages_v}, "
+                        f"comments_len={len(all_comments)}",
+                        file=sys.stderr,
+                    )
                 if page_count >= max_pages_v or len(all_comments) >= max_comments_v:
                     print(
                         "Reached safety limits for pagination; stopping early",
@@ -1081,6 +945,7 @@ async def fetch_pr_non_inline_comments_rest(
                     )
                     break
 
+                # Check for next page using Link header
                 link_header = response.headers.get("Link")
                 next_url: str | None = None
                 if link_header:
@@ -1093,14 +958,14 @@ async def fetch_pr_non_inline_comments_rest(
                     break
 
         logger.info(
-            "Successfully fetched non-inline comments via REST",
+            success_log_message,
             extra={"total_comments": len(all_comments), "page_count": page_count},
         )
         return all_comments
 
     except httpx.TimeoutException as e:
         logger.error(
-            "Timeout fetching non-inline PR comments via REST",
+            timeout_log_message,
             extra={
                 "error": str(e),
                 "owner": owner,
@@ -1112,7 +977,7 @@ async def fetch_pr_non_inline_comments_rest(
         return None
     except httpx.RequestError as e:
         logger.error(
-            "Error fetching non-inline PR comments via REST",
+            request_error_log_message,
             extra={
                 "error": str(e),
                 "owner": owner,
@@ -1122,6 +987,47 @@ async def fetch_pr_non_inline_comments_rest(
         )
         traceback.print_exc(file=sys.stderr)
         raise
+
+
+async def fetch_pr_non_inline_comments_rest(
+    owner: str,
+    repo: str,
+    pull_number: int,
+    *,
+    host: str = "github.com",
+    per_page: int | None = None,
+    max_pages: int | None = None,
+    max_comments: int | None = None,
+    max_retries: int | None = None,
+) -> list[CommentResult] | None:
+    """
+    Fetch non-inline pull request comments from the GitHub Issues API.
+
+    These are conversation-level comments on the PR itself (not code-line
+    review comments).
+    """
+
+    def _convert_non_inline_comment(comment: dict[str, Any]) -> CommentResult:
+        return NonInlineCommentModel.from_rest(comment).model_dump(exclude_none=True)
+
+    return await _fetch_pr_comments_rest_generic(
+        owner=owner,
+        repo=repo,
+        pull_number=pull_number,
+        host=host,
+        per_page=per_page,
+        max_pages=max_pages,
+        max_comments=max_comments,
+        max_retries=max_retries,
+        endpoint_template="/issues/{pull_number}/comments",
+        context_name="fetch_pr_non_inline_comments",
+        fetch_log_message="Fetching non-inline PR comments via REST",
+        page_log_message="Fetching REST API page for non-inline comments",
+        success_log_message="Successfully fetched non-inline comments via REST",
+        timeout_log_message="Timeout fetching non-inline PR comments via REST",
+        request_error_log_message="Error fetching non-inline PR comments via REST",
+        comment_from_rest=_convert_non_inline_comment,
+    )
 
 
 def _fence_for(text: str, minimum: int = 3) -> str:
