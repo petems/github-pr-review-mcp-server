@@ -1404,7 +1404,7 @@ class PRReviewServer:
                             "type": "string",
                             "description": (
                                 "GraphQL review thread ID to resolve "
-                                "(for example PRT_kwDO... )."
+                                "(for example PRRT_kwDO... )."
                             ),
                         },
                         "host": {
