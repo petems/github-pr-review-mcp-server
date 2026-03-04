@@ -12,20 +12,27 @@ import time
 import traceback
 from collections.abc import Awaitable, Callable, Sequence
 from importlib.metadata import version
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 from urllib.parse import quote
 
 import httpx
 from dotenv import load_dotenv
 from mcp import server
-from mcp.server.lowlevel.server import NotificationOptions
+from mcp.server.lowlevel.server import (
+    CombinationContent,
+    NotificationOptions,
+    StructuredContent,
+    UnstructuredContent,
+)
 from mcp.server.models import InitializationOptions
 from mcp.types import (
     TextContent,
     Tool,
+    ToolAnnotations,
 )
 from pydantic import ValidationError
 
+from .errors import ToolExecutionError
 from .git_pr_resolver import (
     api_base_for_host,
     git_detect_repo_branch,
@@ -39,9 +46,15 @@ from .github_api_constants import (
 )
 from .models import (
     FetchPRReviewCommentsArgs,
+    GithubListPrReviewCommentsArgs,
+    GithubResolveOpenPrUrlResult,
+    PaginatedReviewCommentsResult,
     ResolveOpenPrUrlArgs,
     ReviewCommentModel,
+    ToolErrorDetailsModel,
+    ToolErrorEnvelopeModel,
 )
+from .pagination import decode_cursor, encode_cursor
 
 # Load environment variables
 load_dotenv()
@@ -886,16 +899,15 @@ async def fetch_pr_comments(
                 page_count += 1
 
                 # Enforce safety bounds to prevent unbounded memory/time use
-                print(
-                    "DEBUG: page_count="
-                    f"{page_count}, MAX_PAGES={max_pages_v}, "
-                    f"comments_len={len(all_comments)}",
-                    file=sys.stderr,
-                )
                 if page_count >= max_pages_v or len(all_comments) >= max_comments_v:
-                    print(
+                    logger.info(
                         "Reached safety limits for pagination; stopping early",
-                        file=sys.stderr,
+                        extra={
+                            "page_count": page_count,
+                            "max_pages": max_pages_v,
+                            "fetched_comments": len(all_comments),
+                            "max_comments": max_comments_v,
+                        },
                     )
                     break
 
@@ -942,6 +954,181 @@ async def fetch_pr_comments(
         )
         traceback.print_exc(file=sys.stderr)
         raise
+
+
+def _extract_next_link(link_header: str | None) -> str | None:
+    """Extract the pagination URL for rel=next from an HTTP Link header."""
+    if not link_header:
+        return None
+    match = re.search(r"<([^>]+)>;\s*rel=\"next\"", link_header)
+    return match.group(1) if match else None
+
+
+async def fetch_pr_comments_page(
+    owner: str,
+    repo: str,
+    pull_number: int,
+    *,
+    host: str = "github.com",
+    limit: int = 50,
+    cursor: str | None = None,
+    max_retries: int | None = None,
+) -> tuple[list[CommentResult], str | None]:
+    """Fetch exactly one REST page of PR comments and return a next cursor."""
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        raise ToolExecutionError(
+            code="auth",
+            message="GitHub authentication is required to list review comments.",
+            next_steps=[
+                "Set GITHUB_TOKEN in the environment.",
+                "Ensure the token has Pull Requests read access.",
+            ],
+        )
+
+    headers: dict[str, str] = {
+        "Accept": GITHUB_ACCEPT_HEADER,
+        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        "User-Agent": GITHUB_USER_AGENT,
+        "Authorization": f"Bearer {token}",
+    }
+    per_page = _int_conf("HTTP_PER_PAGE", 100, 1, 100, limit)
+    max_retries_v = _int_conf("HTTP_MAX_RETRIES", 3, 0, 10, max_retries)
+
+    if cursor:
+        try:
+            url = decode_cursor(cursor)
+        except ValueError as exc:
+            raise ToolExecutionError(
+                code="invalid_arguments",
+                message="The provided cursor is invalid.",
+                next_steps=[
+                    "Use the nextCursor value returned by a previous response.",
+                    "Restart pagination with cursor omitted.",
+                ],
+            ) from exc
+    else:
+        safe_owner = quote(owner, safe="")
+        safe_repo = quote(repo, safe="")
+        api_base = api_base_for_host(host)
+        url = (
+            f"{api_base}/repos/{safe_owner}/{safe_repo}/pulls/{pull_number}"
+            f"/comments?per_page={per_page}"
+        )
+
+    total_timeout = _float_conf("HTTP_TIMEOUT", 30.0, TIMEOUT_MIN, TIMEOUT_MAX)
+    connect_timeout = _float_conf(
+        "HTTP_CONNECT_TIMEOUT", 10.0, CONNECT_TIMEOUT_MIN, CONNECT_TIMEOUT_MAX
+    )
+
+    try:
+        timeout = httpx.Timeout(timeout=total_timeout, connect=connect_timeout)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            rate_limit_handler = RateLimitHandler("fetch_pr_comments_page")
+            used_token_fallback = False
+
+            async def handle_rest_status(
+                resp: httpx.Response, _attempt: int
+            ) -> str | None:
+                nonlocal used_token_fallback
+                if (
+                    resp.status_code == 401
+                    and not used_token_fallback
+                    and headers.get("Authorization", "").startswith("Bearer ")
+                ):
+                    headers["Authorization"] = f"token {token}"
+                    used_token_fallback = True
+                    return "retry"
+                return await rate_limit_handler.handle_rate_limit(resp)
+
+            async def make_rest_request(page_url: str = url) -> httpx.Response:
+                return await client.get(page_url, headers=headers)
+
+            try:
+                response = await _retry_http_request(
+                    make_rest_request,
+                    max_retries_v,
+                    status_handler=handle_rest_status,
+                )
+            except SecondaryRateLimitError as exc:
+                raise ToolExecutionError(
+                    code="rate_limited",
+                    message=(
+                        "GitHub rate limiting prevented the request from completing."
+                    ),
+                    next_steps=[
+                        "Wait and retry after the rate limit reset window.",
+                        "Reduce request frequency or requested page size.",
+                    ],
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if status_code in (401, 403):
+                    raise ToolExecutionError(
+                        code="auth",
+                        message="GitHub rejected the request due to authentication.",
+                        next_steps=[
+                            "Verify GITHUB_TOKEN is valid.",
+                            "Ensure the token includes Pull Requests read access.",
+                        ],
+                    ) from exc
+                if status_code == 404:
+                    raise ToolExecutionError(
+                        code="not_found",
+                        message="The pull request could not be found.",
+                        next_steps=[
+                            "Verify the owner, repo, and pull number.",
+                            "Confirm the token has access to the repository.",
+                        ],
+                    ) from exc
+                raise ToolExecutionError(
+                    code="upstream",
+                    message=f"GitHub API request failed with status {status_code}.",
+                    next_steps=[
+                        "Retry the request.",
+                        "Check GitHub API status if failures persist.",
+                    ],
+                ) from exc
+
+            page_comments = response.json()
+            if not isinstance(page_comments, list) or not all(
+                isinstance(item, dict) for item in page_comments
+            ):
+                raise ToolExecutionError(
+                    code="upstream",
+                    message="GitHub returned an unexpected response payload.",
+                    next_steps=[
+                        "Retry the request.",
+                        "Check server logs for response parsing failures.",
+                    ],
+                )
+
+            comments: list[CommentResult] = []
+            for comment in page_comments:
+                review_comment = ReviewCommentModel.from_rest(comment)
+                comments.append(review_comment.model_dump(exclude_none=True))
+
+            next_url = _extract_next_link(response.headers.get("Link"))
+            next_cursor = encode_cursor(next_url) if next_url else None
+            return comments, next_cursor
+    except httpx.TimeoutException as exc:
+        raise ToolExecutionError(
+            code="upstream",
+            message="Timed out while requesting GitHub review comments.",
+            next_steps=[
+                "Retry with a smaller limit.",
+                "Check network connectivity to GitHub.",
+            ],
+        ) from exc
+    except httpx.RequestError as exc:
+        raise ToolExecutionError(
+            code="upstream",
+            message="Network error while requesting GitHub review comments.",
+            next_steps=[
+                "Retry the request.",
+                "Check network connectivity and proxy settings.",
+            ],
+        ) from exc
 
 
 def generate_markdown(comments: Sequence[CommentResult]) -> str:
@@ -1025,6 +1212,7 @@ def generate_markdown(comments: Sequence[CommentResult]) -> str:
 
 
 T = TypeVar("T")
+ToolCallResult = UnstructuredContent | StructuredContent | CombinationContent
 
 
 class PRReviewServer:
@@ -1048,6 +1236,25 @@ class PRReviewServer:
         Each tool is defined as a Tool object containing name, description,
         and parameters.
         """
+        read_only_annotations = ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+        paginated_or_error_schema: dict[str, Any] = {
+            "oneOf": [
+                PaginatedReviewCommentsResult.model_json_schema(),
+                ToolErrorEnvelopeModel.model_json_schema(),
+            ]
+        }
+        resolve_or_error_schema: dict[str, Any] = {
+            "oneOf": [
+                GithubResolveOpenPrUrlResult.model_json_schema(),
+                ToolErrorEnvelopeModel.model_json_schema(),
+            ]
+        }
+
         return [
             Tool(
                 name="fetch_pr_review_comments",
@@ -1060,6 +1267,7 @@ class PRReviewServer:
                 ),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "pr_url": {
                             "type": "string",
@@ -1128,6 +1336,7 @@ class PRReviewServer:
                         },
                     },
                 },
+                annotations=read_only_annotations,
             ),
             Tool(
                 name="resolve_open_pr_url",
@@ -1141,6 +1350,7 @@ class PRReviewServer:
                 ),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "select_strategy": {
                             "type": "string",
@@ -1171,12 +1381,33 @@ class PRReviewServer:
                         },
                     },
                 },
+                annotations=read_only_annotations,
+            ),
+            Tool(
+                name="github_list_pr_review_comments",
+                description=(
+                    "Lists pull request review comments and returns a paginated "
+                    "review comment result."
+                ),
+                inputSchema=GithubListPrReviewCommentsArgs.model_json_schema(),
+                outputSchema=paginated_or_error_schema,
+                annotations=read_only_annotations,
+            ),
+            Tool(
+                name="github_resolve_open_pr_url",
+                description=(
+                    "Resolves an open pull request URL and returns a structured URL "
+                    "result."
+                ),
+                inputSchema=ResolveOpenPrUrlArgs.model_json_schema(),
+                outputSchema=resolve_or_error_schema,
+                annotations=read_only_annotations,
             ),
         ]
 
     async def handle_call_tool(
         self, name: str, arguments: dict[str, Any]
-    ) -> Sequence[TextContent]:
+    ) -> ToolCallResult:
         """
         Dispatch a tool invocation by name and return its textual outputs.
 
@@ -1200,6 +1431,18 @@ class PRReviewServer:
                 executing the requested tool.
         """
 
+        def _error_tuple(
+            code: str, message: str, next_steps: list[str]
+        ) -> tuple[list[TextContent], dict[str, Any]]:
+            envelope = ToolErrorEnvelopeModel(
+                error=ToolErrorDetailsModel(
+                    code=code,  # type: ignore[arg-type]
+                    message=message,
+                    next_steps=next_steps,
+                )
+            )
+            return [TextContent(type="text", text=message)], envelope.model_dump()
+
         async def _run_with_handling(operation: Callable[[], Awaitable[T]]) -> T:
             try:
                 return await operation()
@@ -1211,10 +1454,70 @@ class PRReviewServer:
                 traceback.print_exc(file=sys.stderr)
                 raise RuntimeError(error_msg) from exc
 
+        if name == "github_list_pr_review_comments":
+            try:
+                validated_args = GithubListPrReviewCommentsArgs.model_validate(
+                    arguments
+                )
+            except ValidationError as exc:
+                first_error = exc.errors()[0] if exc.errors() else None
+                if first_error:
+                    field = (
+                        first_error["loc"][0] if first_error.get("loc") else "unknown"
+                    )
+                    msg = first_error.get("msg", "Invalid value")
+                    return _error_tuple(
+                        "invalid_arguments",
+                        f"Invalid argument for {field}: {msg}",
+                        [
+                            "Check the tool input schema and fix invalid fields.",
+                            "Retry with valid argument values.",
+                        ],
+                    )
+                return _error_tuple(
+                    "invalid_arguments",
+                    "Invalid arguments.",
+                    ["Check the tool input schema and retry."],
+                )
+
+            args_dict = validated_args.model_dump(exclude_none=True)
+            try:
+                paginated_comments = await _run_with_handling(
+                    lambda: self.list_pr_review_comments(
+                        pr_url=args_dict.get("pr_url"),
+                        owner=args_dict.get("owner"),
+                        repo=args_dict.get("repo"),
+                        branch=args_dict.get("branch"),
+                        host=args_dict.get("host"),
+                        select_strategy=args_dict.get("select_strategy", "branch"),
+                        limit=args_dict.get("limit", 50),
+                        cursor=args_dict.get("cursor"),
+                        author=args_dict.get("author"),
+                        path_prefix=args_dict.get("path_prefix"),
+                        include_resolved=args_dict.get("include_resolved"),
+                    )
+                )
+            except ToolExecutionError as exc:
+                return _error_tuple(
+                    exc.code,
+                    exc.message,
+                    exc.next_steps,
+                )
+
+            summary = f"Fetched {len(paginated_comments.items)} review comment(s)."
+            if paginated_comments.next_cursor:
+                summary += " Use nextCursor to fetch the next page."
+            return (
+                [TextContent(type="text", text=summary)],
+                paginated_comments.model_dump(exclude_none=True, by_alias=True),
+            )
+
         if name == "fetch_pr_review_comments":
             # Validate arguments using Pydantic model
             try:
-                validated_args = FetchPRReviewCommentsArgs.model_validate(arguments)
+                validated_fetch_args = FetchPRReviewCommentsArgs.model_validate(
+                    arguments
+                )
             except ValidationError as e:
                 # Transform Pydantic validation errors to ValueError
                 errors = e.errors()
@@ -1297,7 +1600,7 @@ class PRReviewServer:
                 raise ValueError("Invalid arguments") from None
 
             # Extract validated arguments
-            args_dict = validated_args.model_dump(exclude_none=True)
+            args_dict = validated_fetch_args.model_dump(exclude_none=True)
 
             comments = await _run_with_handling(
                 lambda: self.fetch_pr_review_comments(
@@ -1328,7 +1631,7 @@ class PRReviewServer:
                 results.append(TextContent(type="text", text=md))
             return results
 
-        if name == "resolve_open_pr_url":
+        if name in {"resolve_open_pr_url", "github_resolve_open_pr_url"}:
             # Validate arguments using Pydantic model
             try:
                 validated_args_resolve = ResolveOpenPrUrlArgs.model_validate(arguments)
@@ -1339,7 +1642,24 @@ class PRReviewServer:
                     first_error = errors[0]
                     field = first_error["loc"][0] if first_error["loc"] else "unknown"
                     msg = first_error["msg"]
+                    if name == "github_resolve_open_pr_url":
+                        return _error_tuple(
+                            "invalid_arguments",
+                            f"Invalid value for {field}: {msg}",
+                            [
+                                (
+                                    "Check the tool input schema and retry with "
+                                    "valid values."
+                                )
+                            ],
+                        )
                     raise ValueError(f"Invalid value for {field}: {msg}") from e
+                if name == "github_resolve_open_pr_url":
+                    return _error_tuple(
+                        "invalid_arguments",
+                        "Invalid arguments.",
+                        ["Check the tool input schema and retry."],
+                    )
                 raise ValueError("Invalid arguments") from e
 
             # Extract validated arguments
@@ -1358,15 +1678,45 @@ class PRReviewServer:
                 branch = branch or ctx.branch
                 host = host or ctx.host
 
-            resolved_url = await _run_with_handling(
-                lambda: resolve_pr_url(
-                    owner=owner or "",
-                    repo=repo or "",
-                    branch=branch,
-                    select_strategy=select_strategy,
-                    host=host,
+            try:
+                resolved_url = await _run_with_handling(
+                    lambda: resolve_pr_url(
+                        owner=owner or "",
+                        repo=repo or "",
+                        branch=branch,
+                        select_strategy=select_strategy,
+                        host=host,
+                    )
                 )
-            )
+            except ValueError as exc:
+                if name == "github_resolve_open_pr_url":
+                    return _error_tuple(
+                        "not_found",
+                        str(exc),
+                        [
+                            "Verify owner/repo/branch values.",
+                            "Try select_strategy='latest' to return any open PR.",
+                        ],
+                    )
+                raise
+            except RuntimeError as exc:
+                if name == "github_resolve_open_pr_url":
+                    return _error_tuple(
+                        "upstream",
+                        str(exc),
+                        [
+                            "Retry the request.",
+                            "Verify GITHUB_TOKEN has repository read access.",
+                        ],
+                    )
+                raise
+            if name == "github_resolve_open_pr_url":
+                summary = "Resolved open pull request URL."
+                payload = GithubResolveOpenPrUrlResult(url=resolved_url)
+                return (
+                    [TextContent(type="text", text=summary)],
+                    payload.model_dump(exclude_none=True),
+                )
             return [TextContent(type="text", text=resolved_url)]
 
         raise ValueError(f"Unknown tool: {name}")
@@ -1443,7 +1793,20 @@ class PRReviewServer:
                         "branch": branch,
                     },
                 )
-                pr_url = tool_resp[0].text
+                content_blocks: UnstructuredContent
+                if isinstance(tool_resp, tuple):
+                    content_blocks = cast(UnstructuredContent, tool_resp[0])
+                elif isinstance(tool_resp, dict):
+                    raise ValueError(
+                        "Unexpected structured response for resolve_open_pr_url"
+                    )
+                else:
+                    content_blocks = tool_resp
+
+                first_block = next(iter(content_blocks), None)
+                if not isinstance(first_block, TextContent):
+                    raise ValueError("Failed to resolve PR URL from tool response")
+                pr_url = first_block.text
 
             host, owner, repo, pull_number_str = get_pr_info(pr_url)
             pull_number = int(pull_number_str)
@@ -1462,6 +1825,149 @@ class PRReviewServer:
             print(error_msg, file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             return [{"error": error_msg}]
+
+    async def list_pr_review_comments(
+        self,
+        *,
+        pr_url: str | None = None,
+        owner: str | None = None,
+        repo: str | None = None,
+        branch: str | None = None,
+        host: str | None = None,
+        select_strategy: str = "branch",
+        limit: int = 50,
+        cursor: str | None = None,
+        author: str | None = None,
+        path_prefix: str | None = None,
+        include_resolved: bool | None = None,
+    ) -> PaginatedReviewCommentsResult:
+        """List one page of PR review comments with cursor-based pagination."""
+        resolved_url = pr_url
+        request_owner = owner
+        request_repo = repo
+        request_host = host
+        pull_number: int | None = None
+
+        if not cursor:
+            if not resolved_url:
+                if not (request_owner and request_repo and branch):
+                    try:
+                        ctx = git_detect_repo_branch()
+                    except ValueError as exc:
+                        raise ToolExecutionError(
+                            code="invalid_arguments",
+                            message=(
+                                "Unable to detect repository context for PR resolution."
+                            ),
+                            next_steps=[
+                                "Run the tool in a git repository checkout.",
+                                "Or pass owner/repo/branch explicitly.",
+                            ],
+                        ) from exc
+                    request_owner = request_owner or ctx.owner
+                    request_repo = request_repo or ctx.repo
+                    branch = branch or ctx.branch
+                    request_host = request_host or ctx.host
+                try:
+                    resolved_url = await resolve_pr_url(
+                        owner=request_owner or "",
+                        repo=request_repo or "",
+                        branch=branch,
+                        select_strategy=select_strategy,
+                        host=request_host,
+                    )
+                except ValueError as exc:
+                    raise ToolExecutionError(
+                        code="not_found",
+                        message=str(exc),
+                        next_steps=[
+                            "Verify owner/repo/branch values.",
+                            "Try select_strategy='latest' to choose any open PR.",
+                        ],
+                    ) from exc
+                except httpx.HTTPError as exc:
+                    raise ToolExecutionError(
+                        code="upstream",
+                        message="GitHub API error while resolving pull request URL.",
+                        next_steps=[
+                            "Retry the request.",
+                            "Verify GITHUB_TOKEN has repository access.",
+                        ],
+                    ) from exc
+
+            try:
+                (
+                    request_host,
+                    request_owner,
+                    request_repo,
+                    pull_number_str,
+                ) = get_pr_info(resolved_url)
+                pull_number = int(pull_number_str)
+            except ValueError as exc:
+                raise ToolExecutionError(
+                    code="invalid_arguments",
+                    message=f"Invalid pull request URL: {resolved_url}",
+                    next_steps=[
+                        (
+                            "Provide a valid URL in the format "
+                            "https://host/owner/repo/pull/123."
+                        ),
+                        (
+                            "Or omit pr_url and provide owner/repo/branch for "
+                            "auto-resolution."
+                        ),
+                    ],
+                ) from exc
+
+        try:
+            comments, next_cursor = await fetch_pr_comments_page(
+                owner=request_owner or "placeholder-owner",
+                repo=request_repo or "placeholder-repo",
+                pull_number=pull_number or 0,
+                host=request_host or "github.com",
+                limit=limit,
+                cursor=cursor,
+            )
+        except ToolExecutionError:
+            raise
+        except (ValueError, RuntimeError) as exc:
+            raise ToolExecutionError(
+                code="internal_error",
+                message="Unexpected failure while listing review comments.",
+                next_steps=[
+                    "Retry the request.",
+                    "Check server logs if the error persists.",
+                ],
+            ) from exc
+
+        filtered_comments: list[CommentResult] = []
+        for comment in comments:
+            if include_resolved is not None:
+                is_resolved = comment.get("is_resolved", False)
+                if bool(is_resolved) is not include_resolved:
+                    continue
+
+            if author:
+                user_data = comment.get("user")
+                login = user_data.get("login") if isinstance(user_data, dict) else None
+                if login != author:
+                    continue
+
+            if path_prefix:
+                path = str(comment.get("path", ""))
+                if not path.startswith(path_prefix):
+                    continue
+
+            filtered_comments.append(comment)
+
+        structured_items = [
+            ReviewCommentModel.model_validate(comment) for comment in filtered_comments
+        ]
+        return PaginatedReviewCommentsResult(
+            items=structured_items,
+            next_cursor=next_cursor,
+            total=len(structured_items),
+        )
 
     async def run(self) -> None:
         """Start the MCP server over stdio."""
