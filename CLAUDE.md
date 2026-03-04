@@ -50,6 +50,19 @@ uv run ruff format . && uv run ruff check --fix . && uv run mypy . && make compi
 uv run ruff format --check . && uv run ruff check . && uv run mypy . && make compile-check && uv run pytest
 ```
 
+## Pre-commit Hook Installation Notes
+
+- Standard hook install commands:
+  - `uv run --extra dev pre-commit install`
+  - `uv run --extra dev pre-commit install --hook-type commit-msg`
+- Smoke check:
+  - `uv run --extra dev pre-commit run --all-files`
+- If `pre-commit install` is blocked by a global `core.hooksPath` (for example `/usr/local/dd/global_hooks`), install hooks directly into the repo's `.git/hooks` via pre-commit's install API.
+- In this repository, that produced:
+  - `/Users/peter.souter/projects/github-pr-review-mcp-server/.git/hooks/pre-commit`
+  - `/Users/peter.souter/projects/github-pr-review-mcp-server/.git/hooks/commit-msg`
+- Ensure both hook scripts exist and are executable. The global hook chain should call into these repo-level hooks.
+
 ## HTTP Transport
 
 The server supports both stdio (default) and HTTP transport:
