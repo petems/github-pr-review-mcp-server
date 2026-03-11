@@ -15,6 +15,21 @@
 
 Returns one or two text blocks depending on the `output` parameter. Markdown responses are formatted with review comment details including resolution status and code context.
 
+## `fetch_pr_non_inline_comments`
+
+- **Description**: Fetch non-inline pull request conversation comments (issue comments on the PR timeline) and render them as Markdown or JSON.
+- **Parameters**:
+  - `pr_url` (string, optional): Full PR URL. When omitted, auto-resolves from git metadata.
+  - `output` (enum): `"markdown"` (default), `"json"`, or `"both"`.
+  - `per_page` (int): Overrides pagination size. Defaults from `HTTP_PER_PAGE`.
+  - `max_pages` (int): Safety cap on pagination loops. Defaults from `PR_FETCH_MAX_PAGES`.
+  - `max_comments` (int): Hard limit on total comments collected. Defaults from `PR_FETCH_MAX_COMMENTS`.
+  - `max_retries` (int): Overrides HTTP retry budget. Defaults from `HTTP_MAX_RETRIES`.
+
+### Response
+
+Returns one or two text blocks depending on the `output` parameter. Markdown responses are formatted with comment author, timestamps, and body content.
+
 ## `resolve_open_pr_url`
 
 - **Description**: Resolve the open pull request that matches the current repository and branch.

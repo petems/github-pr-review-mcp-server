@@ -193,11 +193,44 @@ class ReviewCommentModel(BaseModel):
         )
 
 
-class FetchPRReviewCommentsArgs(BaseModel):
-    """Arguments for the fetch_pr_review_comments MCP tool.
+class NonInlineCommentModel(BaseModel):
+    """Represents a non-inline pull request comment from the Issues API."""
 
-    All numeric fields have server-enforced limits to prevent runaway operations.
-    """
+    model_config = ConfigDict(
+        extra="forbid",
+        validate_assignment=True,
+    )
+
+    id: int | str | None = None
+    user: GitHubUserModel
+    body: str = Field(default="")
+    created_at: str | None = None
+    updated_at: str | None = None
+    url: str | None = None
+    html_url: str | None = None
+    author_association: str | None = None
+
+    @classmethod
+    def from_rest(cls, data: dict[str, Any]) -> NonInlineCommentModel:
+        """Create a NonInlineCommentModel from REST API response data."""
+        user_data = data.get("user") or {}
+        user_login = user_data.get("login", "unknown")
+        body = data.get("body") or ""
+
+        return cls(
+            id=data.get("id"),
+            user=GitHubUserModel(login=user_login),
+            body=body,
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
+            url=data.get("url"),
+            html_url=data.get("html_url"),
+            author_association=data.get("author_association"),
+        )
+
+
+class _BaseFetchPRCommentsArgs(BaseModel):
+    """Shared arguments and validation for PR comment fetch tools."""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -232,6 +265,17 @@ class FetchPRReviewCommentsArgs(BaseModel):
         if isinstance(v, float):
             raise ValueError("Invalid type: expected integer")
         return v
+
+
+class FetchPRReviewCommentsArgs(_BaseFetchPRCommentsArgs):
+    """Arguments for the fetch_pr_review_comments MCP tool.
+
+    All numeric fields have server-enforced limits to prevent runaway operations.
+    """
+
+
+class FetchPRNonInlineCommentsArgs(_BaseFetchPRCommentsArgs):
+    """Arguments for the fetch_pr_non_inline_comments MCP tool."""
 
 
 class ResolveOpenPrUrlArgs(BaseModel):

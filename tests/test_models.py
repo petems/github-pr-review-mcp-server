@@ -5,9 +5,11 @@ from pydantic import ValidationError
 
 from mcp_github_pr_review.models import (
     ErrorMessageModel,
+    FetchPRNonInlineCommentsArgs,
     FetchPRReviewCommentsArgs,
     GitContextModel,
     GitHubUserModel,
+    NonInlineCommentModel,
     ResolveOpenPrUrlArgs,
     ResolvePRReviewThreadArgs,
     ReviewCommentModel,
@@ -463,6 +465,33 @@ class TestReviewCommentModel:
         assert "Extra inputs are not permitted" in str(exc_info.value)
 
 
+class TestNonInlineCommentModel:
+    """Tests for NonInlineCommentModel."""
+
+    def test_from_rest_with_complete_data(self) -> None:
+        rest_data = {
+            "id": 123,
+            "user": {"login": "octocat"},
+            "body": "General discussion comment",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-02T00:00:00Z",
+            "url": "https://api.github.com/repos/o/r/issues/comments/123",
+            "html_url": "https://github.com/o/r/pull/1#issuecomment-123",
+            "author_association": "CONTRIBUTOR",
+        }
+        comment = NonInlineCommentModel.from_rest(rest_data)
+        assert comment.id == 123
+        assert comment.user.login == "octocat"
+        assert comment.body == "General discussion comment"
+        assert comment.created_at == "2025-01-01T00:00:00Z"
+        assert comment.updated_at == "2025-01-02T00:00:00Z"
+        assert comment.author_association == "CONTRIBUTOR"
+
+    def test_from_rest_defaults_missing_user_to_unknown(self) -> None:
+        comment = NonInlineCommentModel.from_rest({"body": "No user"})
+        assert comment.user.login == "unknown"
+
+
 class TestFetchPRReviewCommentsArgs:
     """Tests for FetchPRReviewCommentsArgs."""
 
@@ -623,6 +652,30 @@ class TestFetchPRReviewCommentsArgs:
         with pytest.raises(ValidationError) as exc_info:
             FetchPRReviewCommentsArgs(extra_field="value")  # type: ignore
         assert "Extra inputs are not permitted" in str(exc_info.value)
+
+
+class TestFetchPRNonInlineCommentsArgs:
+    """Tests for FetchPRNonInlineCommentsArgs."""
+
+    def test_creates_with_defaults(self) -> None:
+        args = FetchPRNonInlineCommentsArgs()
+        assert args.pr_url is None
+        assert args.output == "markdown"
+        assert args.select_strategy == "branch"
+
+    def test_validates_output_enum(self) -> None:
+        args = FetchPRNonInlineCommentsArgs(output="json")
+        assert args.output == "json"
+
+        with pytest.raises(ValidationError) as exc_info:
+            FetchPRNonInlineCommentsArgs(output="invalid")  # type: ignore
+        error_str = str(exc_info.value)
+        assert "markdown" in error_str and "json" in error_str and "both" in error_str
+
+    def test_rejects_boolean_numeric_fields(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            FetchPRNonInlineCommentsArgs(per_page=True)  # type: ignore
+        assert "Invalid type: expected integer" in str(exc_info.value)
 
 
 class TestResolveOpenPrUrlArgs:
