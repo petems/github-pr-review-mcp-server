@@ -19,4 +19,3 @@ coverage:
 
 sync:
 	uv sync --dev
-

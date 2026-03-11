@@ -39,7 +39,7 @@ jobs:
 
       - name: Run Ruff formatter check
         run: uv run ruff format --check .
-      
+
       - name: Type check with mypy and report coverage
         run: |
           uv run mypy --strict --linecount-report .mypy-coverage .

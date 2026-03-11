@@ -11,6 +11,7 @@ from mcp_github_pr_review.models import (
     GitHubUserModel,
     NonInlineCommentModel,
     ResolveOpenPrUrlArgs,
+    ResolvePRReviewThreadArgs,
     ReviewCommentModel,
 )
 
@@ -317,6 +318,7 @@ class TestReviewCommentModel:
     def test_from_graphql_with_complete_data(self) -> None:
         """Test from_graphql() with complete GraphQL node data."""
         graphql_node = {
+            "threadId": "PRRT_thread123",
             "author": {"login": "octocat"},
             "path": "src/app.py",
             "line": 100,
@@ -332,6 +334,7 @@ class TestReviewCommentModel:
         assert comment.line == 100
         assert comment.body == "Nice work!"
         assert comment.diff_hunk == "@@ -98,3 +98,3 @@"
+        assert comment.thread_id == "PRRT_thread123"
         assert comment.is_resolved is True
         assert comment.is_outdated is False
         assert comment.resolved_by == "maintainer"
@@ -716,3 +719,34 @@ class TestResolveOpenPrUrlArgs:
         with pytest.raises(ValidationError) as exc_info:
             ResolveOpenPrUrlArgs(extra_field="value")  # type: ignore
         assert "Extra inputs are not permitted" in str(exc_info.value)
+
+
+class TestResolvePRReviewThreadArgs:
+    """Tests for ResolvePRReviewThreadArgs."""
+
+    def test_creates_with_required_thread_id(self) -> None:
+        args = ResolvePRReviewThreadArgs(thread_id="PRRT_123")
+        assert args.thread_id == "PRRT_123"
+        assert args.host is None
+        assert args.max_retries is None
+
+    def test_strips_thread_id_whitespace(self) -> None:
+        args = ResolvePRReviewThreadArgs(thread_id="  PRRT_123  ")
+        assert args.thread_id == "PRRT_123"
+
+    def test_rejects_empty_thread_id(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            ResolvePRReviewThreadArgs(thread_id="   ")
+        assert "thread_id must not be empty" in str(exc_info.value)
+
+    def test_validates_max_retries_range(self) -> None:
+        args = ResolvePRReviewThreadArgs(thread_id="PRRT_123", max_retries=3)
+        assert args.max_retries == 3
+
+        with pytest.raises(ValidationError) as exc_info:
+            ResolvePRReviewThreadArgs(thread_id="PRRT_123", max_retries=-1)
+        assert "Input should be greater than or equal to 0" in str(exc_info.value)
+
+        with pytest.raises(ValidationError) as exc_info:
+            ResolvePRReviewThreadArgs(thread_id="PRRT_123", max_retries=11)
+        assert "Input should be less than or equal to 10" in str(exc_info.value)

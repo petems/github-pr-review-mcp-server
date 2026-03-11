@@ -8,7 +8,7 @@ uv sync --dev
 # Run linting
 uv run ruff check .
 
-# Run linting with auto-fix  
+# Run linting with auto-fix
 uv run ruff check --fix .
 
 # Format code
@@ -29,4 +29,3 @@ uv run mcp-github-pr-review
 # Format, lint, and test in one command
 uv run ruff format . && uv run ruff check --fix . && uv run pytest
 ```
-

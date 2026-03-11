@@ -41,6 +41,18 @@ Returns one or two text blocks depending on the `output` parameter. Markdown res
 
 String containing the PR URL, e.g. `https://github.com/cool-kids-inc/github-pr-review-mcp-server/pull/42`.
 
+## `resolve_pr_review_thread`
+
+- **Description**: Resolve a GitHub pull request review thread once the requested issue has been fixed.
+- **Parameters**:
+  - `thread_id` (string, required): GraphQL review thread ID (returned as `thread_id` from `fetch_pr_review_comments`).
+  - `host` (string, optional): GitHub host override for enterprise instances.
+  - `max_retries` (int, optional): Retry budget for transient HTTP failures.
+
+### Response
+
+JSON string with resolution details, including `thread_id`, `is_resolved`, and `resolved_by` when available.
+
 ## Error Codes
 
 | Code | Description | Recommended Action |

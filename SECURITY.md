@@ -34,7 +34,7 @@ This approach follows the principle of least privilege and separates concerns ap
 
 - **Token-based authentication**: Supports both fine-grained Personal Access Tokens (PATs) and classic PATs
 - **Automatic fallback handling**: If Bearer token fails with 401, automatically retries with token scheme for classic PATs
-- **Minimal required scopes**: 
+- **Minimal required scopes**:
   - Public repos: `public_repo` scope only
   - Private repos: `repo` scope only
   - Fine-grained PATs: Pull requests → Read access only
@@ -56,7 +56,7 @@ This approach follows the principle of least privilege and separates concerns ap
 
 ### Memory & Resource Protection
 
-- **Pagination limits**: 
+- **Pagination limits**:
   - Maximum 200 pages (configurable, default 50)
   - Maximum 100,000 comments (configurable, default 2,000)
 - **Per-page limits**: 1-100 comments per page (GitHub API limit)
