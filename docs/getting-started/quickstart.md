@@ -25,7 +25,28 @@ echo "GITHUB_TOKEN=ghp_your_token" > .env
 uv run mcp-github-pr-review
 ```
 
-Once the server is running, connect it from your preferred MCP host (Claude Desktop, Codex CLI, Cursor, etc.). For tailored integration steps, visit [Editor Integrations](../guides/editor-integrations.md).
+Once the server is running, connect it from your preferred MCP host (Claude Desktop, Codex CLI, Cursor, etc.).
+
+## Register with Claude Code CLI
+
+After installing, register the server with Claude Code:
+
+```bash
+# Install as a tool first
+uv tool install mcp-github-pr-review
+
+# Register with Claude Code CLI
+claude mcp add pr-review --scope user --transport stdio --env GITHUB_TOKEN="${GITHUB_TOKEN}" -- \
+  mcp-github-pr-review
+```
+
+**Command structure:**
+- Server name (`pr-review`) comes FIRST
+- All options (`--scope`, `--transport`, `--env`) come after server name but before `--`
+- The `--` separator divides configuration from the command
+- Command and arguments come after `--`
+
+For other hosts (Cursor, VS Code, etc.), visit [Editor Integrations](../guides/editor-integrations.md).
 
 ## Verify a Connection
 
